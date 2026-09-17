@@ -1,0 +1,27 @@
+--- a/include/dt-bindings/clock/qcom,glymur-gcc.h
++++ b/include/dt-bindings/clock/qcom,glymur-gcc.h
+@@ -576,4 +576,10 @@
+ #define GCC_VIDEO_BCR						91
+ #define GCC_VIDEO_AXI0C_CLK_ARES				92
+ 
++#define GCC_USB4PHY_0_PHY_PRIM_BCR				93
++#define GCC_USB4PHY_1_PHY_SEC_BCR				94
++#define GCC_USB4PHY_2_PHY_TERT_BCR				95
++#define GCC_USB4_1_DP0_PHY_SEC_BCR				96
++#define GCC_USB4_2_DP0_PHY_TERT_BCR				97
++
+ #endif
+--- a/drivers/clk/qcom/gcc-glymur.c
++++ b/drivers/clk/qcom/gcc-glymur.c
+@@ -8476,6 +8476,11 @@
+ 	[GCC_VIDEO_AXI1_CLK_ARES] = { 0x32044, 2 },
+ 	[GCC_VIDEO_BCR] = { 0x32000 },
+ 	[GCC_VIDEO_AXI0C_CLK_ARES] = { 0x32030, 2 },
++	[GCC_USB4PHY_0_PHY_PRIM_BCR] = { 0xdb01c },
++	[GCC_USB4PHY_1_PHY_SEC_BCR] = { 0x2c01c },
++	[GCC_USB4PHY_2_PHY_TERT_BCR] = { 0xbe01c },
++	[GCC_USB4_1_DP0_PHY_SEC_BCR] = { 0x2c010 },
++	[GCC_USB4_2_DP0_PHY_TERT_BCR] = { 0xbe010 },
+ };
+ 
+ static const struct clk_rcg_dfs_data gcc_dfs_clocks[] = {

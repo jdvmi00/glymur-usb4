@@ -1,0 +1,86 @@
+Surface Laptop 8: describe the two tested speakers and 2.4 MHz microphones.
+
+Shared reset GPIO 204, native stereo and microphone speech were validated
+on the 13.8-inch Mahua model with Microsoft ADSP firmware. Headset support,
+suspend/resume and speaker protection remain separate validation work.
+
+--- a/arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts
++++ b/arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts
+@@ -587,7 +587,7 @@
+ 	pinctrl-0 = <&dmic01_default>;
+ 	pinctrl-names = "default";
+ 
+-	qcom,dmic-sample-rate = <4800000>;
++	qcom,dmic-sample-rate = <2400000>;
+ };
+ 
+ &mdss {
+@@ -1003,3 +1003,68 @@
+ 
+ 	status = "okay";
+ };
++
++
++/ {
++	sound {
++		compatible = "qcom,glymur-sndcard";
++		model = "GLYMUR-Microsoft-Surface-Laptop-8";
++		audio-routing = "SpkrLeft IN", "WSA WSA_SPK1 OUT",
++				"SpkrRight IN", "WSA WSA_SPK2 OUT",
++				"VA DMIC0", "vdd-micb",
++				"VA DMIC1", "vdd-micb";
++
++		wsa-dai-link {
++			link-name = "WSA Playback";
++			cpu {
++				sound-dai = <&q6apmbedai WSA_CODEC_DMA_RX_0>;
++			};
++			codec {
++				sound-dai = <&surface_spkr0>, <&surface_spkr1>,
++					    <&swr0 0>, <&lpass_wsamacro 0>;
++			};
++			platform {
++				sound-dai = <&q6apm>;
++			};
++		};
++
++		va-dai-link {
++			link-name = "VA Capture";
++			cpu {
++				sound-dai = <&q6apmbedai VA_CODEC_DMA_TX_0>;
++			};
++			codec {
++				sound-dai = <&lpass_vamacro 0>;
++			};
++			platform {
++				sound-dai = <&q6apm>;
++			};
++		};
++	};
++};
++
++&swr0 {
++	status = "okay";
++
++	surface_spkr0: speaker@0,0 {
++		compatible = "sdw20217020400";
++		reg = <0 0>;
++		reset-gpios = <&tlmm 204 GPIO_ACTIVE_LOW>;
++		#sound-dai-cells = <0>;
++		sound-name-prefix = "SpkrLeft";
++		vdd-1p8-supply = <&vreg_l15b_e0>;
++		vdd-io-supply = <&vreg_l18b_e0>;
++		qcom,port-mapping = <1 2 3 7 12 14>;
++	};
++
++	surface_spkr1: speaker@0,1 {
++		compatible = "sdw20217020400";
++		reg = <0 1>;
++		reset-gpios = <&tlmm 204 GPIO_ACTIVE_LOW>;
++		#sound-dai-cells = <0>;
++		sound-name-prefix = "SpkrRight";
++		vdd-1p8-supply = <&vreg_l15b_e0>;
++		vdd-io-supply = <&vreg_l18b_e0>;
++		qcom,port-mapping = <4 5 6 7 13 15>;
++	};
++};

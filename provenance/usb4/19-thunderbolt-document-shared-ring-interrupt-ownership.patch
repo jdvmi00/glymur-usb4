@@ -1,0 +1,14 @@
+--- a/include/linux/thunderbolt.h
++++ b/include/linux/thunderbolt.h
+@@ -557,8 +557,9 @@
+  * @work: Interrupt work structure
+  * @is_tx: Is the ring Tx or Rx
+  * @running: Is the ring running
+- * @irq: MSI-X irq number if the ring uses MSI-X. %0 otherwise.
+- * @vector: MSI-X vector number the ring uses (only set if @irq is > 0)
++ * @irq: Linux IRQ number when the ring uses a dedicated or shared interrupt
++ *	 with a message ID. %0 otherwise. The NHI callbacks own IRQ lifetime.
++ * @vector: Hardware message ID used by the ring (only set if @irq is > 0)
+  * @flags: Ring specific flags
+  * @e2e_tx_hop: Transmit HopID when E2E is enabled. Only applicable to
+  *		RX ring. For TX ring this should be set to %0.

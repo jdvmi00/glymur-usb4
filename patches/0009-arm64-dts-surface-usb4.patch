@@ -1,0 +1,229 @@
+Subject: [REVIEW 09/09] Surface Laptop 8 USB4 and display wiring
+
+Connect router 0, PHY, GLINK and DP endpoints for the 13.8-inch, 12-core Mahua Surface Laptop 8. Retain the exact tested board settings; review diagnostic defaults and board-specific assumptions.
+
+Dependencies: Patches 01-08 and the preserved Surface 1.17 prerequisites. Do not use this device tree for another board.
+
+Source attribution: Local Surface board integration; provenance/usb4/04-glymur-usb4-bindings-board.diff and provenance/derivation.json.
+
+This is a review grouping of preserved source, not a new authorship claim or
+an independently build-validated upstream commit. Original attribution remains
+in the referenced provenance files. No new Signed-off-by trailers are added.
+
+---
+diff --git a/arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts b/arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts
+index 325579eb25062b4cd9a1bad7674949d98d3b80de..b333e9336cf4ea3054fa25d4939e9487f8d93b66 100644
+--- a/arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts
++++ b/arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts
+@@ -175,10 +175,19 @@
+ 
+ 				port@1 {
+ 					reg = <1>;
++					#address-cells = <1>;
++					#size-cells = <0>;
+ 
+-					pmic_glink_ss_in: endpoint {
++					pmic_glink_ss_in: endpoint@0 {
++						reg = <0>;
+ 						remote-endpoint = <&usb_0_qmpphy_out>;
+ 					};
++
++					/* USB4 host router 0 takes tunnelling requests for this port. */
++					pmic_glink_usb4_in: endpoint@1 {
++						reg = <1>;
++						remote-endpoint = <&usb4_0_typec_out>;
++					};
+ 				};
+ 			};
+ 		};
+@@ -597,6 +606,24 @@
+ &mdss_dp0 {
+ 	/* USB-C alt-mode DP through the pmic-glink alt-mode bridge; dp2 has no third USB-C PHY on this board. */
+ 	status = "okay";
++
++	/* USB4 DisplayPort tunneling bring-up: the DP IN link clock branch to router 0. */
++	clocks = <&dispcc DISP_CC_MDSS_AHB_CLK>,
++		 <&dispcc DISP_CC_MDSS_DPTX0_AUX_CLK>,
++		 <&dispcc DISP_CC_MDSS_DPTX0_LINK_CLK>,
++		 <&dispcc DISP_CC_MDSS_DPTX0_LINK_INTF_CLK>,
++		 <&dispcc DISP_CC_MDSS_DPTX0_PIXEL0_CLK>,
++		 <&dispcc DISP_CC_MDSS_DPTX0_PIXEL1_CLK>,
++		 <&dispcc DISP_CC_MDSS_DPTX0_LINK_DPIN_CLK>,
++		 <&dispcc DISP_CC_MDSS_DPTX0_USB_ROUTER_LINK_INTF_CLK>;
++	clock-names = "core_iface",
++		      "core_aux",
++		      "ctrl_link",
++		      "ctrl_link_iface",
++		      "stream_pixel",
++		      "stream_1_pixel",
++		      "ctrl_link_dpin",
++		      "ctrl_usb4_link_iface";
+ };
+ 
+ &mdss_dp0_out {
+@@ -776,6 +803,52 @@
+ 			       <44 4>, /* TPM */
+ 			       <65 1>; /* EC reset (Zenbook/Yoga; unverified here) */
+ 
++	/*
++	 * USB4 router 0 sideband pads, in the captured startup order:
++	 * prepare states before the router reset, active states after it.
++	 */
++	usb4_0_sbrx_prepare: usb4-0-sbrx-prepare-state {
++		pins = "gpio163";
++		function = "gpio";
++		bias-pull-down;
++		output-disable;
++	};
++
++	usb4_0_sbtx_b_prepare: usb4-0-sbtx-b-prepare-state {
++		pins = "gpio165";
++		drive-strength = <10>;
++		output-high;
++	};
++
++	usb4_0_sbtx_a_prepare: usb4-0-sbtx-a-prepare-state {
++		pins = "gpio164";
++		function = "gpio";
++		drive-strength = <10>;
++		bias-pull-down;
++		output-low;
++	};
++
++	usb4_0_sbrx_active: usb4-0-sbrx-active-state {
++		pins = "gpio163";
++		function = "usb0_sbrx";
++		bias-disable;
++		output-disable;
++	};
++
++	usb4_0_sbtx_b_active: usb4-0-sbtx-b-active-state {
++		pins = "gpio165";
++		function = "usb0_sbtx";
++		drive-strength = <10>;
++	};
++
++	usb4_0_sbtx_a_active: usb4-0-sbtx-a-active-state {
++		pins = "gpio164";
++		function = "usb0_sbtx";
++		drive-strength = <10>;
++		bias-pull-up;
++		output-disable;
++	};
++
+ 	tpad_default: tpad-default-state {
+ 		pins = "gpio3";
+ 		function = "gpio";
+@@ -909,6 +982,8 @@
+ &usb_0 {
+ 	/* Dual role: UCSI over the SOCCP drives the role switch (USB-C tests 6-12). */
+ 	dr_mode = "otg";
++	/* SuperSpeed port can be tunneled through USB4 router 0. */
++	usb4-host-interface = <&usb4_0>;
+ 
+ 	status = "okay";
+ };
+@@ -926,7 +1001,95 @@
+ 	status = "okay";
+ };
+ 
++&soc {
++	/* USB4 host router 0 (left, display-adjacent Type-C port). Bring-up description. */
++	usb4_0: usb4@15600000 {
++		compatible = "qcom,glymur-usb4";
++		reg = <0x0 0x15600000 0x0 0x100000>;
++
++		interrupts = <GIC_SPI 70 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 121 IRQ_TYPE_LEVEL_HIGH>;
++		interrupt-names = "nhi", "mcu";
++
++		clocks = <&gcc GCC_CFG_NOC_USB_ANOC_AHB_CLK>,
++			 <&gcc GCC_CFG_NOC_USB_ANOC_SOUTH_AHB_CLK>,
++			 <&gcc GCC_AGGRE_USB4_0_AXI_CLK>,
++			 <&gcc GCC_USB4_0_CFG_AHB_CLK>,
++			 <&gcc GCC_USB4_0_MASTER_CLK>,
++			 <&gcc GCC_USB4_0_SB_IF_CLK>,
++			 <&gcc GCC_USB4_0_TMU_CLK>,
++			 <&gcc GCC_USB4_0_SYS_CLK>,
++			 <&gcc GCC_USB4_0_UC_HRR_CLK>,
++			 <&gcc GCC_USB4_0_DP0_CLK>,
++			 <&gcc GCC_USB4_0_DP1_CLK>,
++			 <&gcc GCC_USB4_0_PHY_PCIE_PIPE_CLK>,
++			 <&gcc GCC_USB4_0_PHY_USB_PIPE_CLK>;
++		clock-names = "anoc_ahb",
++			      "anoc_south_ahb",
++			      "aggre_axi",
++			      "cfg_ahb",
++			      "master",
++			      "sb_if",
++			      "tmu",
++			      "sys",
++			      "uc_hrr",
++			      "dp0",
++			      "dp1",
++			      "pcie_pipe",
++			      "usb_pipe";
++		assigned-clocks = <&gcc GCC_USB4_0_MASTER_CLK_SRC>,
++				  <&gcc GCC_USB4_0_TMU_CLK_SRC>;
++		assigned-clock-rates = <355333500>, <250000000>;
++
++		resets = <&gcc GCC_USB4_0_BCR>,
++			 <&gcc GCC_USB4PHY_0_PHY_PRIM_BCR>,
++			 <&gcc GCC_USB4_0_DP0_PHY_PRIM_BCR>;
++		reset-names = "router", "phy", "dp";
++
++		power-domains = <&gcc GCC_USB4_0_GDSC>;
++		required-opps = <&rpmhpd_opp_nom>;
++
++		interconnects = <&aggre4_noc MASTER_USB4_0 QCOM_ICC_TAG_ALWAYS
++				 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>,
++				<&hsc_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
++				 &config_noc SLAVE_USB4_0 QCOM_ICC_TAG_ACTIVE_ONLY>;
++		interconnect-names = "usb4-ddr", "apps-usb4";
++
++		iommus = <&apps_smmu 0x1440 0x0>;
++
++		phys = <&usb_0_qmpphy QMP_USB43DP_USB4_PHY>;
++		phy-names = "usb4";
++
++		pinctrl-names = "rx-prepare", "txb-prepare", "txa-prepare",
++				"rx-active", "txb-active", "txa-active";
++		pinctrl-0 = <&usb4_0_sbrx_prepare>;
++		pinctrl-1 = <&usb4_0_sbtx_b_prepare>;
++		pinctrl-2 = <&usb4_0_sbtx_a_prepare>;
++		pinctrl-3 = <&usb4_0_sbrx_active>;
++		pinctrl-4 = <&usb4_0_sbtx_b_active>;
++		pinctrl-5 = <&usb4_0_sbtx_a_active>;
++
++		qcom,tcsr = <&tcsr>;
++		qcom,router-index = <0>;
++		firmware-name = "qcom/glymur/surface-laptop8/usb4-router-legacy.bin";
++
++		mode-switch;
++		orientation-switch;
++
++		port {
++			usb4_0_typec_out: endpoint {
++				remote-endpoint = <&pmic_glink_usb4_in>;
++			};
++		};
++	};
++};
++
+ &usb_0_qmpphy {
++	/* Shared USB4 DP producer/AUX block written during USB4 PHY setup. */
++	reg = <0x0 0x00fd5000 0x0 0x8000>,
++	      <0x0 0x00fe6000 0x0 0xcc>;
++	reg-names = "phy", "usb4-dp-aux";
++	qcom,usb4-rx-eq = <0x6f>;
+ 	vdda-phy-supply = <&vreg_l3f_e0>;
+ 	vdda-pll-supply = <&vreg_l4f_e1>;
+ 	refgen-supply = <&vreg_l2f_e0>;
+@@ -958,6 +1121,7 @@
+ };
+ 
+ &usb_1_qmpphy {
++	qcom,usb4-rx-eq = <0x6f>;
+ 	vdda-phy-supply = <&vreg_l2f_e0>;
+ 	vdda-pll-supply = <&vreg_l4f_e1>;
+ 	refgen-supply = <&vreg_l2f_e0>;

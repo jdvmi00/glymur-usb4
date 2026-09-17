@@ -1,0 +1,622 @@
+Subject: [REVIEW 03/09] Shared Thunderbolt host transport and lifecycle
+
+Separate shared NHI/ring handling from PCI transport, extend host callbacks, and carry the router discovery/teardown changes. This patch also carries the Qualcomm glue that lives in shared files: platform driver registration in nhi.c and the DP resource retry hook in tb.c, both guarded by CONFIG_USB4_QCOM. Review effects on existing PCI controllers, DMA ownership and interrupt synchronization.
+
+Dependencies: Base prerequisites for the shared transport. Required by patch 05. The CONFIG_USB4_QCOM-guarded code references qcom_usb4_host_driver, qcom_usb4_dp_driver and the router frontend defined in patch 05, so the tested configuration needs 05 to link.
+
+Source attribution: Local Surface integration; original decomposition in provenance/usb4/10-thunderbolt-share-nhi-teardown.patch through 19-thunderbolt-document-shared-ring-interrupt-ownership.patch; later changes recorded in provenance/derivation.json.
+
+This is a review grouping of preserved source, not a new authorship claim or
+an independently build-validated upstream commit. Original attribution remains
+in the referenced provenance files. No new Signed-off-by trailers are added.
+
+---
+diff --git a/drivers/thunderbolt/ctl.c b/drivers/thunderbolt/ctl.c
+index cd47b627f97b27abb3dde4effd81d2d0ec852383..42db33ea02fe281569ef5594f915dab24eb84c31 100644
+--- a/drivers/thunderbolt/ctl.c
++++ b/drivers/thunderbolt/ctl.c
+@@ -666,7 +666,7 @@ struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, int index, int timeout_msec,
+ 
+ 	mutex_init(&ctl->request_queue_lock);
+ 	INIT_LIST_HEAD(&ctl->request_queue);
+-	ctl->frame_pool = dma_pool_create("thunderbolt_ctl", nhi->dev,
++	ctl->frame_pool = dma_pool_create("thunderbolt_ctl", nhi->dma_dev,
+ 					  TB_FRAME_SIZE, 4, 0);
+ 	if (!ctl->frame_pool)
+ 		goto err;
+diff --git a/drivers/thunderbolt/icm.c b/drivers/thunderbolt/icm.c
+index 669807f0eaf86b05a694f6ee00c5e158b8d130e3..cffe7e57156925ebb13ccec5affb4c6e0f2730cd 100644
+--- a/drivers/thunderbolt/icm.c
++++ b/drivers/thunderbolt/icm.c
+@@ -2478,10 +2478,16 @@ static const struct tb_cm_ops icm_icl_ops = {
+ 
+ struct tb *icm_probe(struct tb_nhi *nhi)
+ {
+-	struct pci_dev *pdev = to_pci_dev(nhi->dev);
++	struct pci_dev *pdev;
+ 	struct icm *icm;
+ 	struct tb *tb;
+ 
++	/* Firmware connection managers below are selected by PCI device ID. */
++	if (!dev_is_pci(nhi->dev))
++		return NULL;
++
++	pdev = to_pci_dev(nhi->dev);
++
+ 	tb = tb_domain_alloc(nhi, ICM_TIMEOUT, sizeof(struct icm));
+ 	if (!tb)
+ 		return NULL;
+diff --git a/drivers/thunderbolt/nhi.c b/drivers/thunderbolt/nhi.c
+index 5809809f64d42b6f69c594d3395b738ade1f1273..f030085f1053168ed108c946e525ae548bc7cf7e 100644
+--- a/drivers/thunderbolt/nhi.c
++++ b/drivers/thunderbolt/nhi.c
+@@ -78,7 +78,7 @@ static void ring_interrupt_active(struct tb_ring *ring, bool active)
+ 	int index = ring_interrupt_index(ring) / 32 * 4;
+ 	int reg = REG_RING_INTERRUPT_BASE + index;
+ 	int interrupt_bit = ring_interrupt_index(ring) & 31;
+-	int mask = 1 << interrupt_bit;
++	u32 mask = BIT(interrupt_bit);
+ 	u32 old, new;
+ 
+ 	if (ring->irq > 0) {
+@@ -128,6 +128,12 @@ static void ring_interrupt_active(struct tb_ring *ring, bool active)
+ 			  ring->vector * 4);
+ 	}
+ 
++	if (ring->nhi->ops->ring_interrupt_mask) {
++		ring->nhi->ops->ring_interrupt_mask(ring->nhi,
++						ring_interrupt_index(ring), !active);
++		return;
++	}
++
+ 	old = ioread32(ring->nhi->iobase + reg);
+ 	if (active)
+ 		new = old | mask;
+@@ -152,11 +158,19 @@ static void ring_interrupt_active(struct tb_ring *ring, bool active)
+ /*
+  * nhi_disable_interrupts() - disable interrupts for all rings
+  *
+- * Use only during init and shutdown.
++ * Use only during init and shutdown, without the NHI lock held. The caller
++ * must keep MMIO accessible and serialize against interrupt rearming. This
++ * does not release physical IRQs or drain interrupt work.
+  */
+ void nhi_disable_interrupts(struct tb_nhi *nhi)
+ {
+ 	int i = 0;
++
++	if (nhi->ops->disable_interrupts) {
++		nhi->ops->disable_interrupts(nhi);
++		return;
++	}
++
+ 	/* disable interrupts */
+ 	for (i = 0; i < RING_INTERRUPT_REG_COUNT(nhi); i++)
+ 		nhi_mask_interrupt(nhi, ~0, 4 * i);
+@@ -391,6 +405,11 @@ static void __ring_interrupt_mask(struct tb_ring *ring, bool mask)
+ 	int bit = idx % 32;
+ 	u32 val;
+ 
++	if (ring->nhi->ops->ring_interrupt_mask) {
++		ring->nhi->ops->ring_interrupt_mask(ring->nhi, idx, mask);
++		return;
++	}
++
+ 	val = ioread32(ring->nhi->iobase + reg);
+ 	if (mask)
+ 		val &= ~BIT(bit);
+@@ -418,7 +437,7 @@ static void __ring_interrupt(struct tb_ring *ring)
+  * @ring: Ring to re-start the interrupt
+  *
+  * This will re-start (unmask) the ring interrupt once the user is done
+- * with polling.
++ * with polling, provided the ring is still running and the NHI is not going away.
+  */
+ void tb_ring_poll_complete(struct tb_ring *ring)
+ {
+@@ -426,7 +445,7 @@ void tb_ring_poll_complete(struct tb_ring *ring)
+ 
+ 	spin_lock_irqsave(&ring->nhi->lock, flags);
+ 	spin_lock(&ring->lock);
+-	if (ring->start_poll)
++	if (ring->start_poll && ring->running && !ring->nhi->going_away)
+ 		__ring_interrupt_mask(ring, false);
+ 	spin_unlock(&ring->lock);
+ 	spin_unlock_irqrestore(&ring->nhi->lock, flags);
+@@ -575,7 +594,7 @@ static struct tb_ring *tb_ring_alloc(struct tb_nhi *nhi, u32 hop, int size,
+ 	ring->start_poll = start_poll;
+ 	ring->poll_data = poll_data;
+ 
+-	ring->descriptors = dma_alloc_coherent(ring->nhi->dev,
++	ring->descriptors = dma_alloc_coherent(ring->nhi->dma_dev,
+ 					       size * sizeof(*ring->descriptors),
+ 					       &ring->descriptors_dma, GFP_KERNEL | __GFP_ZERO);
+ 	if (!ring->descriptors)
+@@ -595,7 +614,7 @@ err_release_msix:
+ 	if (nhi->ops->release_ring_irq)
+ 		nhi->ops->release_ring_irq(ring);
+ err_free_descs:
+-	dma_free_coherent(ring->nhi->dev,
++	dma_free_coherent(ring->nhi->dma_dev,
+ 			  ring->size * sizeof(*ring->descriptors),
+ 			  ring->descriptors, ring->descriptors_dma);
+ err_free_ring:
+@@ -831,7 +850,7 @@ void tb_ring_free(struct tb_ring *ring)
+ 	if (nhi->ops->release_ring_irq)
+ 		nhi->ops->release_ring_irq(ring);
+ 
+-	dma_free_coherent(ring->nhi->dev,
++	dma_free_coherent(ring->nhi->dma_dev,
+ 			  ring->size * sizeof(*ring->descriptors),
+ 			  ring->descriptors, ring->descriptors_dma);
+ 
+@@ -930,52 +949,75 @@ enum nhi_fw_mode nhi_mailbox_mode(struct tb_nhi *nhi)
+ 	return (enum nhi_fw_mode)val;
+ }
+ 
++/**
++ * nhi_handle_interrupt() - Dispatch one captured interrupt cause
++ * @nhi: NHI that reported the cause
++ * @cause: Bit index in the TX, RX and RX overflow status fields
++ *
++ * The caller must hold @nhi->lock. This does not read or acknowledge the
++ * interrupt status. Polling rings retain their normal interrupt masking.
++ *
++ * Return: %true if a transport that masked the captured cause may reenable it.
++ * The caller must keep @nhi->lock held until it consumes this result. Stopped,
++ * polling and interrupt-disabled rings are not rearmed, nor is an NHI that is
++ * going away. This result does not change the normal notification behavior.
++ */
++bool nhi_handle_interrupt(struct tb_nhi *nhi, unsigned int cause)
++{
++	struct tb_ring *ring;
++	int hop, type;
++	bool rearm;
++
++	lockdep_assert_held(&nhi->lock);
++	if (WARN_ON_ONCE(cause >= 3 * nhi->hop_count))
++		return false;
++
++	type = cause / nhi->hop_count;
++	hop = cause % nhi->hop_count;
++	if (type == 2) {
++		dev_warn(nhi->dev, "RX overflow for ring %d\n", hop);
++		return false;
++	}
++	if (type == 0)
++		ring = nhi->tx_rings[hop];
++	else
++		ring = nhi->rx_rings[hop];
++	if (ring == NULL) {
++		dev_warn(nhi->dev,
++			 "got interrupt for inactive %s ring %d\n",
++			 type ? "RX" : "TX", hop);
++		return false;
++	}
++
++	spin_lock(&ring->lock);
++	__ring_interrupt(ring);
++	rearm = ring->running && !ring->start_poll &&
++		!(ring->flags & RING_FLAG_NO_INTERRUPT) && !nhi->going_away;
++	spin_unlock(&ring->lock);
++
++	return rearm;
++}
++
+ void nhi_interrupt_work(struct work_struct *work)
+ {
+ 	struct tb_nhi *nhi = container_of(work, typeof(*nhi), interrupt_work);
+-	int value = 0; /* Suppress uninitialized usage warning. */
++	u32 value = 0;
+ 	int bit;
+-	int hop = -1;
+-	int type = 0; /* current interrupt type 0: TX, 1: RX, 2: RX overflow */
+-	struct tb_ring *ring;
+ 
+ 	spin_lock_irq(&nhi->lock);
+ 
+ 	/*
+ 	 * Starting at REG_RING_NOTIFY_BASE there are three status bitfields
+ 	 * (TX, RX, RX overflow). We iterate over the bits and read a new
+-	 * dwords as required. The registers are cleared on read.
++	 * dword as required. The registers are cleared on read.
+ 	 */
+ 	for (bit = 0; bit < 3 * nhi->hop_count; bit++) {
+ 		if (bit % 32 == 0)
+ 			value = ioread32(nhi->iobase
+ 					 + REG_RING_NOTIFY_BASE
+ 					 + 4 * (bit / 32));
+-		if (++hop == nhi->hop_count) {
+-			hop = 0;
+-			type++;
+-		}
+-		if ((value & (1 << (bit % 32))) == 0)
+-			continue;
+-		if (type == 2) {
+-			dev_warn(nhi->dev, "RX overflow for ring %d\n", hop);
+-			continue;
+-		}
+-		if (type == 0)
+-			ring = nhi->tx_rings[hop];
+-		else
+-			ring = nhi->rx_rings[hop];
+-		if (ring == NULL) {
+-			dev_warn(nhi->dev,
+-				 "got interrupt for inactive %s ring %d\n",
+-				 type ? "RX" : "TX",
+-				 hop);
+-			continue;
+-		}
+-
+-		spin_lock(&ring->lock);
+-		__ring_interrupt(ring);
+-		spin_unlock(&ring->lock);
++		if (value & BIT(bit % 32))
++			nhi_handle_interrupt(nhi, bit);
+ 	}
+ 	spin_unlock_irq(&nhi->lock);
+ }
+@@ -1144,6 +1186,29 @@ void nhi_shutdown(struct tb_nhi *nhi)
+ 		nhi->ops->shutdown(nhi);
+ }
+ 
++/**
++ * nhi_remove() - Remove a successfully probed host interface
++ * @nhi: Host interface to remove
++ *
++ * Drain the domain before shutting down the host interface. The caller must
++ * keep the device and its resources available until this function returns.
++ * Bus-specific shutdown policy, such as forcing host_reset, belongs to the
++ * caller. This is not the cleanup path for a failed nhi_probe().
++ */
++void nhi_remove(struct tb_nhi *nhi)
++{
++	struct device *dev = nhi->dev;
++	struct tb *tb = dev_get_drvdata(dev);
++
++	pm_runtime_get_sync(dev);
++	pm_runtime_dont_use_autosuspend(dev);
++	pm_runtime_forbid(dev);
++
++	tb_domain_remove(tb);
++	wait_for_completion(&nhi->domain_released);
++	nhi_shutdown(nhi);
++}
++
+ static void nhi_reset(struct tb_nhi *nhi)
+ {
+ 	ktime_t timeout;
+@@ -1236,6 +1301,12 @@ int nhi_probe(struct tb_nhi *nhi)
+ 	if (!nhi->ops->init_interrupts)
+ 		return dev_err_probe(dev, -EINVAL, "missing required NHI ops\n");
+ 
++	if (!nhi->dma_dev)
++		nhi->dma_dev = dev;
++
++	/* Interrupt registration may make the handler live immediately. */
++	spin_lock_init(&nhi->lock);
++
+ 	nhi->hop_count = ioread32(nhi->iobase + REG_CAPS) & 0x3ff;
+ 	dev_dbg(dev, "total paths: %d\n", nhi->hop_count);
+ 
+@@ -1255,12 +1326,6 @@ int nhi_probe(struct tb_nhi *nhi)
+ 	if (res)
+ 		return dev_err_probe(dev, res, "cannot enable interrupts, aborting\n");
+ 
+-	spin_lock_init(&nhi->lock);
+-
+-	res = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(64));
+-	if (res)
+-		return dev_err_probe(dev, res, "failed to set DMA mask\n");
+-
+ 	if (nhi->ops->init) {
+ 		res = nhi->ops->init(nhi);
+ 		if (res)
+diff --git a/drivers/thunderbolt/nhi.h b/drivers/thunderbolt/nhi.h
+index f72d6b27450189a5d25f0881af07119482d5e257..f699e712f1855c57bfad32625c36f3025fd7df26 100644
+--- a/drivers/thunderbolt/nhi.h
++++ b/drivers/thunderbolt/nhi.h
+@@ -31,15 +31,29 @@ int nhi_mailbox_cmd(struct tb_nhi *nhi, enum nhi_mailbox_cmd cmd, u32 data);
+ enum nhi_fw_mode nhi_mailbox_mode(struct tb_nhi *nhi);
+ void nhi_enable_int_throttling(struct tb_nhi *nhi);
+ void nhi_disable_interrupts(struct tb_nhi *nhi);
++bool nhi_handle_interrupt(struct tb_nhi *nhi, unsigned int cause);
+ void nhi_interrupt_work(struct work_struct *work);
+ irqreturn_t nhi_msi(int irq, void *data);
+ irqreturn_t ring_msix(int irq, void *data);
++/*
++ * The caller must configure streaming and coherent DMA masks on dma_dev
++ * (or dev when dma_dev is NULL) before probing. Keep the DMA device, its
++ * DMA configuration and IOMMU attachment valid until all users are drained
++ * and nhi_remove() has returned. Do not change dma_dev while users are active.
++ */
+ int nhi_probe(struct tb_nhi *nhi);
++void nhi_remove(struct tb_nhi *nhi);
+ void nhi_shutdown(struct tb_nhi *nhi);
+ void nhi_reset_interface(struct tb_nhi *nhi);
+ 
+ extern const struct dev_pm_ops nhi_pm_ops;
+ 
++#if IS_ENABLED(CONFIG_USB4_QCOM)
++struct platform_driver;
++extern struct platform_driver qcom_usb4_host_driver;
++extern struct platform_driver qcom_usb4_dp_driver;
++#endif
++
+ /**
+  * struct tb_nhi_ops - NHI specific optional operations
+  * @init: NHI specific initialization
+@@ -55,6 +69,14 @@ extern const struct dev_pm_ops nhi_pm_ops;
+  * @is_present: Whether the device is currently present on the parent bus
+  * @init_interrupts: NHI specific interrupt initialization hook
+  * @reset_interface: Resets the host interface
++ * @disable_interrupts: Optional controller-wide interrupt mask/clear transport.
++ *	  Called during init (before @init_interrupts) and shutdown without
++ *	  the NHI lock held. The caller must keep MMIO accessible and serialize
++ *	  against interrupt rearming. Does not release IRQs or drain work.
++ * @ring_interrupt_mask: Optional per-cause mask/unmask transport. Used for
++ *	  ring activation, stop and polling; %true masks, %false unmasks.
++ *	  Called with the NHI lock held and must not sleep. Does not configure
++ *	  vectors, acknowledge status or replace controller-wide IRQ shutdown.
+  */
+ struct tb_nhi_ops {
+ 	int (*init)(struct tb_nhi *nhi);
+@@ -70,6 +92,9 @@ struct tb_nhi_ops {
+ 	bool (*is_present)(struct tb_nhi *nhi);
+ 	int (*init_interrupts)(struct tb_nhi *nhi);
+ 	void (*reset_interface)(struct tb_nhi *nhi);
++	void (*disable_interrupts)(struct tb_nhi *nhi);
++	void (*ring_interrupt_mask)(struct tb_nhi *nhi, unsigned int cause,
++				    bool mask);
+ };
+ 
+ /*
+diff --git a/drivers/thunderbolt/pci.c b/drivers/thunderbolt/pci.c
+index 99333729f3c2ac6f6d00fd00fc1e22173fa75c71..e5439aa2f7a2d1c298e8c9c14d7e14a8f194946f 100644
+--- a/drivers/thunderbolt/pci.c
++++ b/drivers/thunderbolt/pci.c
+@@ -14,6 +14,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/iommu.h>
+ #include <linux/module.h>
++#include <linux/platform_device.h>
+ #include <linux/delay.h>
+ #include <linux/property.h>
+ #include <linux/string_helpers.h>
+@@ -496,6 +497,10 @@ static int nhi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ 	nhi_pci_check_quirks(nhi_pci);
+ 	nhi_pci_check_iommu(nhi_pci);
+ 
++	res = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(64));
++	if (res)
++		return dev_err_probe(dev, res, "failed to set DMA mask\n");
++
+ 	pci_set_master(pdev);
+ 
+ 	return nhi_probe(&nhi_pci->nhi);
+@@ -514,13 +519,7 @@ static void nhi_pci_do_remove(struct pci_dev *pdev, bool reset)
+ 	if (reset)
+ 		nhi->host_reset = true;
+ 
+-	pm_runtime_get_sync(&pdev->dev);
+-	pm_runtime_dont_use_autosuspend(&pdev->dev);
+-	pm_runtime_forbid(&pdev->dev);
+-
+-	tb_domain_remove(tb);
+-	wait_for_completion(&nhi->domain_released);
+-	nhi_shutdown(nhi);
++	nhi_remove(nhi);
+ }
+ 
+ static void nhi_pci_remove(struct pci_dev *pdev)
+@@ -646,14 +645,36 @@ static int __init nhi_init(void)
+ 		return ret;
+ 
+ 	ret = pci_register_driver(&nhi_driver);
+-	if (ret)
++	if (ret) {
+ 		tb_domain_exit();
++		return ret;
++	}
+ 
+-	return ret;
++#if IS_ENABLED(CONFIG_USB4_QCOM)
++	ret = platform_driver_register(&qcom_usb4_dp_driver);
++	if (ret) {
++		pci_unregister_driver(&nhi_driver);
++		tb_domain_exit();
++		return ret;
++	}
++	ret = platform_driver_register(&qcom_usb4_host_driver);
++	if (ret) {
++		platform_driver_unregister(&qcom_usb4_dp_driver);
++		pci_unregister_driver(&nhi_driver);
++		tb_domain_exit();
++		return ret;
++	}
++#endif
++
++	return 0;
+ }
+ 
+ static void __exit nhi_unload(void)
+ {
++#if IS_ENABLED(CONFIG_USB4_QCOM)
++	platform_driver_unregister(&qcom_usb4_host_driver);
++	platform_driver_unregister(&qcom_usb4_dp_driver);
++#endif
+ 	pci_unregister_driver(&nhi_driver);
+ 	tb_domain_exit();
+ }
+diff --git a/drivers/thunderbolt/tb.c b/drivers/thunderbolt/tb.c
+index 47753a5c0f2ebde1dd4701b3b54e35561bdf0364..dbf8752ba701d606d1dbf2217668e812bf0a1748 100644
+--- a/drivers/thunderbolt/tb.c
++++ b/drivers/thunderbolt/tb.c
+@@ -108,6 +108,8 @@ static void tb_queue_hotplug(struct tb *tb, u64 route, u8 port, bool unplug)
+ 
+ /* enumeration & hot plug handling */
+ 
++static void tb_tunnel_dp(struct tb *tb);
++
+ static void tb_add_dp_resources(struct tb_switch *sw)
+ {
+ 	struct tb_cm *tcm = tb_priv(sw->tb);
+@@ -117,8 +119,21 @@ static void tb_add_dp_resources(struct tb_switch *sw)
+ 		if (!tb_port_is_dpin(port))
+ 			continue;
+ 
+-		if (!tb_switch_query_dp_resource(sw, port))
+-			continue;
++		if (!tb_switch_query_dp_resource(sw, port)) {
++			int ret;
++
++			/*
++			 * Bring-up probe: the Qualcomm host router reports its DP IN
++			 * adapters unavailable at start; record the raw result and
++			 * try an explicit allocation once so the firmware contract
++			 * shows up in the log.
++			 */
++			ret = tb_switch_alloc_dp_resource(sw, port);
++			tb_port_info(port, "DP IN resource not available at start; explicit alloc: %d\n", ret);
++			if (ret)
++				continue;
++			tb_port_info(port, "DP IN resource allocated explicitly\n");
++		}
+ 
+ 		/*
+ 		 * If DP IN on device router exist, position it at the
+@@ -135,6 +150,54 @@ static void tb_add_dp_resources(struct tb_switch *sw)
+ 	}
+ }
+ 
++#if IS_ENABLED(CONFIG_USB4_QCOM)
++/*
++ * Bring-up hook for the Qualcomm host router: after the platform driver has
++ * talked to the router firmware, re-run DP IN resource discovery for the
++ * host router and retry DP tunneling without a domain restart.
++ */
++void tb_qcom_retry_dp_resources(struct tb *tb)
++{
++	struct tb_cm *tcm = tb_priv(tb);
++	struct tb_switch *sw = tb->root_switch;
++	struct tb_port *port;
++	int ret;
++
++	mutex_lock(&tb->lock);
++	if (!sw)
++		goto out;
++	tb_switch_for_each_port(sw, port) {
++		struct tb_port *listed;
++		bool present = false;
++
++		if (!tb_port_is_dpin(port))
++			continue;
++		list_for_each_entry(listed, &tcm->dp_resources, list) {
++			if (listed == port) {
++				present = true;
++				break;
++			}
++		}
++		if (present) {
++			tb_port_info(port, "DP IN resource already listed\n");
++			continue;
++		}
++		if (tb_switch_query_dp_resource(sw, port)) {
++			tb_port_info(port, "DP IN resource now available\n");
++		} else {
++			ret = tb_switch_alloc_dp_resource(sw, port);
++			tb_port_info(port, "DP IN resource explicit alloc on retry: %d\n", ret);
++			if (ret)
++				continue;
++		}
++		list_add_tail(&port->list, &tcm->dp_resources);
++	}
++	tb_tunnel_dp(tb);
++out:
++	mutex_unlock(&tb->lock);
++}
++#endif
++
+ static void tb_remove_dp_resources(struct tb_switch *sw)
+ {
+ 	struct tb_cm *tcm = tb_priv(sw->tb);
+diff --git a/drivers/thunderbolt/tb.h b/drivers/thunderbolt/tb.h
+index 4373336d9425e379fcc0fc551deee9e2e2ca5c13..72f3ce47e8e03f0f8e91f10f7f6c00efba06549b 100644
+--- a/drivers/thunderbolt/tb.h
++++ b/drivers/thunderbolt/tb.h
+@@ -1030,6 +1030,9 @@ int tb_switch_configure_link(struct tb_switch *sw);
+ void tb_switch_unconfigure_link(struct tb_switch *sw);
+ 
+ bool tb_switch_query_dp_resource(struct tb_switch *sw, struct tb_port *in);
++#if IS_ENABLED(CONFIG_USB4_QCOM)
++void tb_qcom_retry_dp_resources(struct tb *tb);
++#endif
+ int tb_switch_alloc_dp_resource(struct tb_switch *sw, struct tb_port *in);
+ void tb_switch_dealloc_dp_resource(struct tb_switch *sw, struct tb_port *in);
+ 
+diff --git a/drivers/thunderbolt/usb4.c b/drivers/thunderbolt/usb4.c
+index 5fd4fe070f25844c28a4ba7fda149edfc2014c3a..c4096e1f8b75e2135eac693816d26035a9e8f94d 100644
+--- a/drivers/thunderbolt/usb4.c
++++ b/drivers/thunderbolt/usb4.c
+@@ -905,6 +905,8 @@ bool usb4_switch_query_dp_resource(struct tb_switch *sw, struct tb_port *in)
+ 
+ 	ret = usb4_switch_op(sw, USB4_SWITCH_OP_QUERY_DP_RESOURCE, &metadata,
+ 			     &status);
++	tb_port_info(in, "QUERY_DP_RESOURCE: ret %d status %u metadata %#x\n",
++		     ret, ret ? 0 : status, metadata);
+ 	/*
+ 	 * If DP resource allocation is not supported assume it is
+ 	 * always available.
+@@ -938,6 +940,8 @@ int usb4_switch_alloc_dp_resource(struct tb_switch *sw, struct tb_port *in)
+ 
+ 	ret = usb4_switch_op(sw, USB4_SWITCH_OP_ALLOC_DP_RESOURCE, &metadata,
+ 			     &status);
++	tb_port_info(in, "ALLOC_DP_RESOURCE: ret %d status %u metadata %#x\n",
++		     ret, status, metadata);
+ 	if (ret == -EOPNOTSUPP)
+ 		return 0;
+ 	if (ret)
+diff --git a/include/linux/thunderbolt.h b/include/linux/thunderbolt.h
+index d48623fda79ba43fe1c90d3e37e2cccf43e620ea..a955609c5449411979c7bc83e4144386838b8915 100644
+--- a/include/linux/thunderbolt.h
++++ b/include/linux/thunderbolt.h
+@@ -502,6 +502,10 @@ void tb_service_properties_changed(struct tb_service *svc);
+  * @lock: Must be held during ring creation/destruction. Is acquired by
+  *	  interrupt_work when dispatching interrupts to individual rings.
+  * @dev: Device associated with this NHI instance
++ * @dma_dev: Device used for DMA allocations and mappings. If NULL, nhi_probe()
++ *	   uses @dev. The caller must keep this device and its DMA configuration
++ *	   valid until all users are drained and NHI teardown has completed.
++ *	   Must not change while users are active.
+  * @ops: NHI specific optional ops
+  * @iobase: MMIO space of the NHI
+  * @tx_rings: All Tx rings available on this host controller
+@@ -523,6 +527,7 @@ void tb_service_properties_changed(struct tb_service *svc);
+ struct tb_nhi {
+ 	spinlock_t lock;
+ 	struct device *dev;
++	struct device *dma_dev;
+ 	const struct tb_nhi_ops *ops;
+ 	void __iomem *iobase;
+ 	struct tb_ring **tx_rings;
+@@ -552,8 +557,9 @@ struct tb_nhi {
+  * @work: Interrupt work structure
+  * @is_tx: Is the ring Tx or Rx
+  * @running: Is the ring running
+- * @irq: MSI-X irq number if the ring uses MSI-X. %0 otherwise.
+- * @vector: MSI-X vector number the ring uses (only set if @irq is > 0)
++ * @irq: Linux IRQ number when the ring uses a dedicated or shared interrupt
++ *	 with a message ID. %0 otherwise. The NHI callbacks own IRQ lifetime.
++ * @vector: Hardware message ID used by the ring (only set if @irq is > 0)
+  * @flags: Ring specific flags
+  * @e2e_tx_hop: Transmit HopID when E2E is enabled. Only applicable to
+  *		RX ring. For TX ring this should be set to %0.
+@@ -731,7 +737,7 @@ int tb_ring_throttling(struct tb_ring *ring, unsigned int interval_nsec);
+  */
+ static inline struct device *tb_ring_dma_device(struct tb_ring *ring)
+ {
+-	return ring->nhi->dev;
++	return ring->nhi->dma_dev;
+ }
+ 
+ bool usb4_usb3_port_match(struct device *usb4_port_dev,

@@ -1,0 +1,179 @@
+diff -ruN fake/drivers/gpu/drm/msm/dp/dp_panel.c fake2/drivers/gpu/drm/msm/dp/dp_panel.c
+--- a/drivers/gpu/drm/msm/dp/dp_panel.c	2026-09-11 11:04:41.000974358 -0500
++++ b/drivers/gpu/drm/msm/dp/dp_panel.c	2026-09-11 13:48:37.001574569 -0500
+@@ -7,6 +7,7 @@
+ #include "dp_reg.h"
+ #include "dp_utils.h"
+ 
++#include <linux/moduleparam.h>
+ #include <drm/drm_connector.h>
+ #include <drm/drm_edid.h>
+ #include <drm/drm_of.h>
+@@ -18,6 +19,14 @@
+ 
+ #define DP_INTF_CONFIG_DATABUS_WIDEN     BIT(4)
+ 
++/*
++ * Bring-up knob: train an eDP sink at DPCD MAX_LINK_RATE, ignoring its
++ * SUPPORTED_LINK_RATES table and the endpoint's link-frequencies cap.
++ */
++static bool edp_force_max_link_rate;
++module_param(edp_force_max_link_rate, bool, 0444);
++MODULE_PARM_DESC(edp_force_max_link_rate, "eDP: train at DPCD MAX_LINK_RATE (ignore SUPPORTED_LINK_RATES and link-frequencies)");
++
+ struct msm_dp_panel_private {
+ 	struct device *dev;
+ 	struct drm_device *drm_dev;
+@@ -113,7 +122,7 @@
+ 	max_lttpr_rate = drm_dp_lttpr_max_link_rate(link->lttpr_common_caps);
+ 
+ 	/* eDP sink */
+-	if (msm_dp_panel->dpcd[DP_EDP_CONFIGURATION_CAP]) {
++	if (msm_dp_panel->dpcd[DP_EDP_CONFIGURATION_CAP] && !edp_force_max_link_rate) {
+ 		u8 edp_rev;
+ 
+ 		rc = drm_dp_dpcd_read_byte(panel->aux, DP_EDP_DPCD_REV, &edp_rev);
+@@ -179,7 +188,7 @@
+ 		link_info->rate = drm_dp_max_link_rate(dpcd);
+ 
+ 		/* Limit link rate from link-frequencies of endpoint property of dtsi */
+-		if (link_info->rate > link->max_dp_link_rate)
++		if (link_info->rate > link->max_dp_link_rate && !edp_force_max_link_rate)
+ 			link_info->rate = link->max_dp_link_rate;
+ 
+ 		/* Limit link rate from LTTPR capabilities, if any */
+diff -ruN fake/drivers/phy/qualcomm/phy-qcom-edp.c fake2/drivers/phy/qualcomm/phy-qcom-edp.c
+--- a/drivers/phy/qualcomm/phy-qcom-edp.c	2026-09-11 11:04:41.013847266 -0500
++++ b/drivers/phy/qualcomm/phy-qcom-edp.c	2026-09-11 13:48:37.001064320 -0500
+@@ -295,7 +295,7 @@
+ };
+ 
+ static const u8 edp_phy_vco_div_cfg_v8[4] = {
+-	0x00, 0x00, 0x02, 0x01,
++	0x00, 0x00, 0x07, 0x01,	/* 5400: as programmed by the Surface Laptop 8 firmware */
+ };
+ 
+ static int qcom_edp_phy_init(struct phy *phy)
+@@ -938,7 +938,7 @@
+ 		break;
+ 
+ 	case 5400:
+-		step1 = 0x5b;
++		step1 = 0x18;
+ 		step2 = 0x02;
+ 		break;
+ 
+@@ -968,6 +968,10 @@
+ 	u32 code1_mode0;
+ 	u32 code2_mode0;
+ 	u32 hsclk_sel;
++	u32 coreclk_div = 0x0a;
++	u32 cmn_config_1 = 0x96;
++	u32 vco_tune1 = 0xa0;
++	u32 vco_tune2 = 0x01;
+ 
+ 	switch (dp_opts->link_rate) {
+ 	case 1620:
+@@ -986,8 +990,8 @@
+ 		dec_start_mode0 = 0x34;
+ 		div_frac_start2_mode0 = 0xc0;
+ 		div_frac_start3_mode0 = 0x0b;
+-		lock_cmp1_mode0 = 0x07;
+-		lock_cmp2_mode0 = 0x07;
++		lock_cmp1_mode0 = 0x8c;
++		lock_cmp2_mode0 = 0x0a;
+ 		code1_mode0 = 0x71;
+ 		code2_mode0 = 0x0c;
+ 		break;
+@@ -1010,6 +1014,25 @@
+ 		break;
+ 
+ 	case 5400:
++		/*
++		 * 10.8 GHz VCO / 2, as programmed by the Surface Laptop 8 firmware
++		 * (captured from the live PHY). The shared 12.15 GHz row below
++		 * also locks but its wire rate is unverified.
++		 */
++		hsclk_sel = 0x1;
++		dec_start_mode0 = 0x46;
++		div_frac_start2_mode0 = 0x00;
++		div_frac_start3_mode0 = 0x05;
++		lock_cmp1_mode0 = 0x10;
++		lock_cmp2_mode0 = 0x0e;
++		code1_mode0 = 0xf6;
++		code2_mode0 = 0x20;
++		coreclk_div = 0x14;
++		cmn_config_1 = 0x56;
++		vco_tune1 = 0xae;
++		vco_tune2 = 0x02;
++		break;
++
+ 	case 8100:
+ 		hsclk_sel = 0x2;
+ 		dec_start_mode0 = 0x4f;
+@@ -1042,7 +1065,7 @@
+ 	writel(0x00, edp->pll + DP_QSERDES_V8_COM_DIV_FRAC_START1_MODE0);
+ 	writel(div_frac_start2_mode0, edp->pll + DP_QSERDES_V8_COM_DIV_FRAC_START2_MODE0);
+ 	writel(div_frac_start3_mode0, edp->pll + DP_QSERDES_V8_COM_DIV_FRAC_START3_MODE0);
+-	writel(0x96, edp->pll + DP_QSERDES_V8_COM_CMN_CONFIG_1);
++	writel(cmn_config_1, edp->pll + DP_QSERDES_V8_COM_CMN_CONFIG_1);
+ 	writel(0x3f, edp->pll + DP_QSERDES_V8_COM_INTEGLOOP_GAIN0_MODE0);
+ 	writel(0x00, edp->pll + DP_QSERDES_V8_COM_INTEGLOOP_GAIN1_MODE0);
+ 	writel(0x00, edp->pll + DP_QSERDES_V8_COM_VCO_TUNE_MAP);
+@@ -1050,12 +1073,12 @@
+ 	writel(lock_cmp2_mode0, edp->pll + DP_QSERDES_V8_COM_LOCK_CMP2_MODE0);
+ 
+ 	writel(0x0a, edp->pll + DP_QSERDES_V8_COM_BG_TIMER);
+-	writel(0x0a, edp->pll + DP_QSERDES_V8_COM_CORECLK_DIV_MODE0);
++	writel(coreclk_div, edp->pll + DP_QSERDES_V8_COM_CORECLK_DIV_MODE0);
+ 	writel(0x00, edp->pll + DP_QSERDES_V8_COM_VCO_TUNE_CTRL);
+ 	writel(0x1f, edp->pll + DP_QSERDES_V8_COM_BIAS_EN_CLKBUFLR_EN);
+ 	writel(0x00, edp->pll + DP_QSERDES_V8_COM_CORE_CLK_EN);
+-	writel(0xa0, edp->pll + DP_QSERDES_V8_COM_VCO_TUNE1_MODE0);
+-	writel(0x01, edp->pll + DP_QSERDES_V8_COM_VCO_TUNE2_MODE0);
++	writel(vco_tune1, edp->pll + DP_QSERDES_V8_COM_VCO_TUNE1_MODE0);
++	writel(vco_tune2, edp->pll + DP_QSERDES_V8_COM_VCO_TUNE2_MODE0);
+ 
+ 	writel(code1_mode0, edp->pll + DP_QSERDES_V8_COM_BIN_VCOCAL_CMP_CODE1_MODE0);
+ 	writel(code2_mode0, edp->pll + DP_QSERDES_V8_COM_BIN_VCOCAL_CMP_CODE2_MODE0);
+@@ -1163,6 +1186,13 @@
+ 	writel(0x05, edp->edp + DP_PHY_TX0_TX1_LANE_CTL);
+ 	writel(0x05, edp->edp + DP_PHY_TX2_TX3_LANE_CTL);
+ 
++	if (edp->cfg->ver_ops == &qcom_edp_phy_ops_v8) {
++		writel(0x05, edp->edp + 0xc0);	/* v8 TX2_TX3_LANE_CTL */
++		writel(0x10, edp->edp + 0x78);	/* v8 TSYNC_OVRD */
++		writel(0x12, edp->edp + 0xe4);	/* v8 LN0_DRV_LVL */
++		writel(0x12, edp->edp + 0xe8);	/* v8 LN1_DRV_LVL */
++	}
++
+ 	/* TX-0 register configuration */
+ 	writel(0x03, edp->tx0 + TXn_TRANSCEIVER_BIAS_EN);
+ 	writel(0x0f, edp->tx0 + TXn_CLKBUF_ENABLE);
+@@ -1204,6 +1234,26 @@
+ 	writel(0x11, edp->tx1 + TXn_RES_CODE_LANE_OFFSET_TX0);
+ 	writel(0x11, edp->tx1 + TXn_RES_CODE_LANE_OFFSET_TX1);
+ 
++	if (edp->cfg->ver_ops == &qcom_edp_phy_ops_v8) {
++		/*
++		 * v8 TX lane register map differs from the TXn_ offsets above:
++		 * 0x44/0x48 are not RES_CODE_LANE_OFFSET and 0x84 is LANE_MODE_1
++		 * (the LDO_CONFIG write hits it). Values as programmed by the
++		 * Surface Laptop 8 firmware; without them clock recovery passes
++		 * but channel equalization never completes.
++		 */
++		writel(0x06, edp->tx0 + 0x44);
++		writel(0x06, edp->tx0 + 0x48);
++		writel(0x06, edp->tx1 + 0x44);
++		writel(0x06, edp->tx1 + 0x48);
++		writel(0xd0, edp->tx0 + 0x84);
++		writel(0xd0, edp->tx1 + 0x84);
++		writel(0x44, edp->tx0 + 0x88);
++		writel(0x44, edp->tx1 + 0x88);
++		writel(0x01, edp->tx0 + 0x90);
++		writel(0x01, edp->tx1 + 0x90);
++	}
++
+ 	writel(0x10, edp->tx0 + TXn_TX_EMP_POST1_LVL);
+ 	writel(0x10, edp->tx1 + TXn_TX_EMP_POST1_LVL);
+ 	writel(0x1f, edp->tx0 + TXn_TX_DRV_LVL);

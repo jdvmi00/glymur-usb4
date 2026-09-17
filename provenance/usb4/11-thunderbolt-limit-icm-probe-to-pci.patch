@@ -1,0 +1,19 @@
+--- a/drivers/thunderbolt/icm.c
++++ b/drivers/thunderbolt/icm.c
+@@ -2478,9 +2478,15 @@
+ 
+ struct tb *icm_probe(struct tb_nhi *nhi)
+ {
+-	struct pci_dev *pdev = to_pci_dev(nhi->dev);
++	struct pci_dev *pdev;
+ 	struct icm *icm;
+ 	struct tb *tb;
++
++	/* Firmware connection managers below are selected by PCI device ID. */
++	if (!dev_is_pci(nhi->dev))
++		return NULL;
++
++	pdev = to_pci_dev(nhi->dev);
+ 
+ 	tb = tb_domain_alloc(nhi, ICM_TIMEOUT, sizeof(struct icm));
+ 	if (!tb)

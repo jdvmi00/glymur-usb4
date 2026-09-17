@@ -1,0 +1,4350 @@
+Subject: [REVIEW 05/09] Qualcomm router and DisplayPort provider
+
+Add the Glymur router frontend, firmware/MCU control, NHI transport, startup, events, Type-C handling and DP provider. Review probe failures, release/restart, asynchronous work and the public display contract.
+
+Dependencies: Patches 01-04; patches 06-07 complete the coupled display integration. Apply the complete series before building.
+
+Source attribution: Local Surface integration; provenance/usb4/22-usb4-glymur-host-router-frontend.patch and the later source sequence recorded in provenance/derivation.json. The retained local diffs do not identify authors per hunk.
+
+This is a review grouping of preserved source, not a new authorship claim or
+an independently build-validated upstream commit. Original attribution remains
+in the referenced provenance files. No new Signed-off-by trailers are added.
+
+---
+diff --git a/drivers/thunderbolt/Kconfig b/drivers/thunderbolt/Kconfig
+index 294b3227a54582536433cbb391057b99bb9df352..989aa73ce89134a0c42277c8fc2a5f72097751ef 100644
+--- a/drivers/thunderbolt/Kconfig
++++ b/drivers/thunderbolt/Kconfig
+@@ -75,4 +75,17 @@ config USB4_STREAM
+ 	  To compile this driver a module, choose M here. The module will be
+ 	  called thunderbolt_stream.
+ 
++config USB4_QCOM
++	bool "Qualcomm Glymur USB4 host router (bring-up)"
++	depends on OF && QCOM_SMEM && CLK_GLYMUR_GCC && PINCTRL && MFD_SYSCON
++	depends on ARCH_QCOM || COMPILE_TEST
++	depends on DRM_MSM
++	select DRM_DISPLAY_HELPER
++	help
++	  Platform frontend for the Qualcomm Glymur USB4 host router as
++	  captured on the Surface Laptop 8: router firmware upload, MCU
++	  startup, the line-interrupt NHI adapter and Type-C mailbox
++	  commands. Requires the board's router firmware image under
++	  /lib/firmware. Experimental.
++
+ endif # USB4
+diff --git a/drivers/thunderbolt/Makefile b/drivers/thunderbolt/Makefile
+index beb054c3126b1445d26b4c14de039d23367a5100..d1ef6906cf5d86e0e9d891d5450651afb6533888 100644
+--- a/drivers/thunderbolt/Makefile
++++ b/drivers/thunderbolt/Makefile
+@@ -16,3 +16,7 @@ obj-$(CONFIG_USB4_DMA_TEST) += thunderbolt_dma_test.o
+ 
+ thunderbolt_stream-${CONFIG_USB4_STREAM} += stream.o
+ obj-$(CONFIG_USB4_STREAM) += thunderbolt_stream.o
++
++thunderbolt-$(CONFIG_USB4_QCOM) += qcom-usb4-fw.o qcom-usb4-drom.o qcom-usb4-mcu.o \
++	qcom-usb4-typec.o qcom-usb4-irq.o qcom-usb4-nhi.o qcom-usb4-startup.o \
++	qcom-usb4-events.o qcom-usb4-host.o qcom-usb4-dp.o qcom-usb4-dp-link.o
+diff --git a/drivers/thunderbolt/qcom-usb4-dp-link.c b/drivers/thunderbolt/qcom-usb4-dp-link.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..f691a42a8756285e34b48efc3bea4d49fc5fe7ce
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-dp-link.c
+@@ -0,0 +1,245 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Surface Laptop 8 router 0 / DP IN 0 bring-up protocol.
++ * These adapter registers are scoped to the verified Mahua instance.
++ * Capability publication follows real receiver reads; it is not a bypass
++ * of the connection manager's DPRX completion check.
++ */
++#include <linux/bitops.h>
++#include <linux/delay.h>
++#include <linux/errno.h>
++#include <linux/iopoll.h>
++#include <linux/printk.h>
++#include <drm/display/drm_dp_helper.h>
++
++#include "qcom-usb4-dp-link.h"
++
++#define DP_LOCAL		0x6038
++#define DP_REMOTE	0x603c
++#define DP_COMMON	0x6044
++#define DP_LOCAL_WRITE	0x84070
++#define DP_COMMON_WRITE	0x84078
++#define DP_STATUS	0x83154
++#define DP_ACK		0x83158
++
++static u32 field(u32 word, u32 mask)
++{
++	return (word & mask) >> __ffs(mask);
++}
++
++static u32 replace(u32 word, u32 mask, u32 value)
++{
++	return (word & ~mask) | ((value << __ffs(mask)) & mask);
++}
++
++static void update(void __iomem *router, unsigned int offset, u32 mask, u32 val)
++{
++	writel((readl(router + offset) & ~mask) | (val & mask), router + offset);
++}
++
++static u32 intersect(u32 local, u32 remote, u32 common)
++{
++	static const u32 masks[] = {
++		GENMASK(3, 0), GENMASK(7, 4), GENMASK(11, 8), GENMASK(14, 12),
++		BIT(15), BIT(22), BIT(24), BIT(25), BIT(26), BIT(27), BIT(29),
++	};
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(masks); i++) {
++		u32 a = field(local, masks[i]), b = field(remote, masks[i]);
++		bool maximum = masks[i] & (BIT(25) | BIT(27) | BIT(29));
++
++		common = replace(common, masks[i], maximum ? max(a, b) : min(a, b));
++	}
++	return common & ~BIT(31);
++}
++
++static int rate_index(unsigned int rate)
++{
++	switch (rate) {
++	case 162000: return 0;
++	case 270000: return 1;
++	case 540000: return 2;
++	case 810000: return 3;
++	default: return -EINVAL;
++	}
++}
++
++static u8 link_byte(u32 caps, unsigned int rate, unsigned int lanes)
++{
++	return (caps & BIT(24) ? BIT(7) : 0) |
++	       (caps & BIT(22) ? BIT(6) : 0) | BIT(4) |
++	       ((rate & 2) << 4) | (lanes << 1) | (rate & 1);
++}
++
++int qcom_usb4_dp_negotiate_caps(void __iomem *router, struct drm_dp_aux *aux,
++			      qcom_usb4_dp_control_fn control, void *ctx)
++{
++	u8 caps[DP_RECEIVER_CAP_SIZE], tx[4] = {};
++	u32 local, common, revision, lanes;
++	int rate, ret;
++
++	local = readl(router + DP_LOCAL);
++	common = intersect(local, readl(router + DP_REMOTE),
++			   readl(router + DP_COMMON));
++	writel(common, router + DP_COMMON_WRITE);
++	ret = drm_dp_dpcd_read(aux, DP_DPCD_REV, caps, sizeof(caps));
++	if (ret != sizeof(caps))
++		return ret < 0 ? ret : -EIO;
++	if (caps[DP_TRAINING_AUX_RD_INTERVAL] & DP_EXTENDED_RECEIVER_CAP_FIELD_PRESENT) {
++		ret = drm_dp_dpcd_read(aux, DP_DP13_DPCD_REV, caps, sizeof(caps));
++		if (ret != sizeof(caps))
++			return ret < 0 ? ret : -EIO;
++	}
++	if (caps[0] < 0x11 || caps[0] > 0x14)
++		return -EOPNOTSUPP;
++	revision = caps[0] - 0x11;
++	rate = rate_index(drm_dp_bw_code_to_link_rate(caps[DP_MAX_LINK_RATE]));
++	lanes = caps[DP_MAX_LANE_COUNT] & DP_MAX_LANE_COUNT_MASK;
++	if (rate < 0 || (lanes != 1 && lanes != 2 && lanes != 4))
++		return -EOPNOTSUPP;
++	lanes = __ffs(lanes);
++	common = replace(common, GENMASK(7, 4), min(field(common, GENMASK(7, 4)), revision));
++	common = replace(common, GENMASK(11, 8), min(field(common, GENMASK(11, 8)), (u32)rate));
++	common = replace(common, GENMASK(14, 12), min(field(common, GENMASK(14, 12)), lanes));
++	if (!(caps[DP_MAX_LANE_COUNT] & DP_ENHANCED_FRAME_CAP))
++		common &= ~BIT(15);
++	if (!(caps[DP_MAX_LANE_COUNT] & DP_TPS3_SUPPORTED))
++		common &= ~BIT(22);
++	if (!(caps[DP_MAX_DOWNSPREAD] & DP_TPS4_SUPPORTED))
++		common &= ~BIT(24);
++	writel(common, router + DP_COMMON_WRITE);
++
++	/* Tell the far adapter the receiver revision. This has TX completion only. */
++	tx[0] = revision;
++	tx[1] = 0x13;
++	tx[2] = link_byte(common, field(common, GENMASK(11, 8)),
++			  1U << field(common, GENMASK(14, 12)));
++	ret = control(ctx, tx, NULL);
++	if (ret)
++		return ret;
++	writel(common | BIT(31), router + DP_COMMON_WRITE);
++	return 0;
++}
++
++int qcom_usb4_dp_configure_link(void __iomem *router,
++			       qcom_usb4_dp_dpsw_fn dpsw, void *ctx,
++			       unsigned int rate_khz, unsigned int lanes)
++{
++	u32 value, common = readl(router + DP_COMMON);
++	int rate = rate_index(rate_khz), ret;
++
++	if (rate < 0 || (lanes != 1 && lanes != 2 && lanes != 4))
++		return -EINVAL;
++	if (!(common & BIT(31)) || rate > field(common, GENMASK(11, 8)) ||
++	    lanes > (1U << field(common, GENMASK(14, 12))))
++		return -EINVAL;
++	update(router, 0x85000, BIT(0), rate < 2 ? BIT(0) : 0);
++
++	/* Native producer reset acknowledgment, after its clocks/PHY are ready. */
++	if (!(readl(router + 0x84044) & BIT(1))) {
++		writel(BIT(5), router + DP_ACK);
++		update(router, 0x84044, BIT(0), BIT(0));
++		ret = readl_poll_timeout(router + DP_STATUS, value, value & BIT(5), 100, 50000);
++		if (!ret) {
++			writel(BIT(5), router + DP_ACK);
++		} else {
++			/* Windows only pulses this reset when the first request times out. */
++			pr_warn("qcom-usb4-dp: initial reset ACK timed out (%#x), trying fallback\n", value);
++			update(router, 0x85008, BIT(0), BIT(0));
++			usleep_range(1000, 1100);
++			update(router, 0x85008, BIT(0), 0);
++			update(router, 0x84044, BIT(0), BIT(0));
++			ret = readl_poll_timeout(router + 0x84044, value,
++					 value & BIT(1), 100, 50000);
++			if (ret) {
++				pr_err("qcom-usb4-dp: fallback reset ACK timed out (%#x)\n", value);
++				return ret;
++			}
++		}
++	}
++	writel(BIT(4), router + DP_ACK);
++	ret = dpsw(ctx, 1);
++	if (ret) {
++		pr_err("qcom-usb4-dp: producer-enable command failed: %d\n", ret);
++		return ret;
++	}
++	ret = readl_poll_timeout(router + DP_STATUS, value, value & BIT(4), 100, 50000);
++	if (ret) {
++		pr_err("qcom-usb4-dp: producer-enable ACK timed out (%#x)\n", value);
++		return ret;
++	}
++	writel(BIT(4), router + DP_ACK);
++	update(router, 0x84000, GENMASK(5, 0), 0);
++	/* The scoped MSM path is SST; this bit selects MST producer framing. */
++	update(router, 0x84004, BIT(0), 0);
++	value = readl(router + 0x84008);
++	switch (rate) {
++	case 3:
++		value = (value & ~7) | 0x300;
++		writel(value, router + 0x84008);
++		usleep_range(1000, 1100);
++		value = (value & ~0x204) | 0x103;
++		break;
++	case 2: value = (value & ~0x105) | 0x202; break;
++	case 1: value = (value & ~6) | 0x301; break;
++	default: value = (value & ~7) | 0x300; break;
++	}
++	writel(value, router + 0x84008);
++	update(router, 0x84084, BIT(3), 0);
++	pr_debug("qcom-usb4-dp: producer configured at %u kHz, %u lanes\n", rate_khz, lanes);
++	return 0;
++}
++
++/* USB4 2.0 autonomous mode: autonomous DP OUT training, then clock sync. */
++int qcom_usb4_dp_train_link(void __iomem *router,
++			    qcom_usb4_dp_control_fn control, void *ctx,
++			    unsigned int rate_khz, unsigned int lanes)
++{
++	u8 tx[4] = {}, rx[4];
++	u32 value, common = readl(router + DP_COMMON);
++	int rate = rate_index(rate_khz), ret;
++
++	if (rate < 0 || (lanes != 1 && lanes != 2 && lanes != 4))
++		return -EINVAL;
++	if (!(common & BIT(31)) || rate > field(common, GENMASK(11, 8)) ||
++	    lanes > (1U << field(common, GENMASK(14, 12))))
++		return -EINVAL;
++
++	/*
++	 * Windows requests link down before startup training. With LC=LR=0
++	 * there is no training result; control() waits for control completion.
++	 */
++	tx[1] = 1;
++	tx[2] = link_byte(common, 0, 0);
++	ret = control(ctx, tx, NULL);
++	if (ret)
++		return ret;
++	/* Respect the SET_CONFIG minimum gap before the next request. */
++	usleep_range(50, 100);
++
++	/* Mode zero: the DP OUT adapter trains its physical link itself.
++	 * Its matching SET_LINK response reports completed receiver training.
++	 */
++	tx[1] = 1;
++	tx[2] = link_byte(common, rate, lanes);
++	ret = control(ctx, tx, rx);
++	if (ret)
++		return ret;
++	if (rx[1] != tx[1] || rx[0] || ((rx[2] ^ tx[2]) & 0x2f))
++		return -EREMOTEIO;
++	update(router, 0x84074, 0xf07, (rate << 8) | lanes);
++
++	/* Windows 0x1d43d8: request sync, wait for status bit 3, acknowledge. */
++	writel(BIT(3), router + DP_ACK);
++	update(router, 0x8400c, BIT(0), BIT(0));
++	ret = readl_poll_timeout(router + DP_STATUS, value, value & BIT(3), 100, 36000);
++	if (ret) {
++		pr_err("qcom-usb4-dp: clock-sync ACK timed out (%#x)\n", value);
++		return ret;
++	}
++	writel(BIT(3), router + DP_ACK);
++	pr_info("qcom-usb4-dp: receiver trained and clock sync complete at %u kHz, %u lanes\n",
++		rate_khz, lanes);
++	return 0;
++}
+diff --git a/drivers/thunderbolt/qcom-usb4-dp-link.h b/drivers/thunderbolt/qcom-usb4-dp-link.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..44c33bed8354dfb314e331fb7f7e0377bf7025ac
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-dp-link.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef QCOM_USB4_DP_LINK_H
++#define QCOM_USB4_DP_LINK_H
++
++#include <linux/io.h>
++#include <linux/types.h>
++
++struct drm_dp_aux;
++typedef int (*qcom_usb4_dp_control_fn)(void *ctx, const u8 tx[4], u8 rx[4]);
++typedef int (*qcom_usb4_dp_dpsw_fn)(void *ctx, u32 command);
++
++int qcom_usb4_dp_negotiate_caps(void __iomem *router, struct drm_dp_aux *aux,
++			      qcom_usb4_dp_control_fn control, void *ctx);
++int qcom_usb4_dp_configure_link(void __iomem *router,
++			       qcom_usb4_dp_dpsw_fn dpsw, void *ctx,
++			       unsigned int rate_khz, unsigned int lanes);
++int qcom_usb4_dp_train_link(void __iomem *router,
++			    qcom_usb4_dp_control_fn control, void *ctx,
++			    unsigned int rate_khz, unsigned int lanes);
++#endif
+diff --git a/drivers/thunderbolt/qcom-usb4-dp.c b/drivers/thunderbolt/qcom-usb4-dp.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e2070667d46921bc9de22c41fee7d700900fab7
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-dp.c
+@@ -0,0 +1,876 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Surface Laptop 8 router 0 / DP IN 0 experimental display owner.
++ *
++ * The firmware's op-4 mailbox messages are requests to the display owner,
++ * not adapter hardware commands. Service them independently of the USB4
++ * connection manager, which may be synchronously waiting for their replies.
++ * FIFO AUX/control transactions use a separate lock and work item so that
++ * slow receiver discovery cannot stall those mailbox replies.
++ */
++#include <linux/bitfield.h>
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/jiffies.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/platform_device.h>
++#include <linux/device/driver.h>
++#include <linux/pm_runtime.h>
++#include <linux/slab.h>
++#include <linux/soc/qcom/usb4-dp.h>
++#include <linux/unaligned.h>
++#include <linux/workqueue.h>
++
++#include <drm/display/drm_dp_helper.h>
++
++#include "qcom-usb4-dp.h"
++#include "qcom-usb4-dp-link.h"
++
++#define DP_AUX_BASE		0x83000
++#define DP_ADAPTER_STRIDE	0x3000
++#define DP_FIFO_TX		0x000
++#define DP_FIFO_TX_DATA		0x004
++#define DP_FIFO_RX_CONSUME	0x03c
++#define DP_FIFO_RX_STATUS	0x044
++#define DP_FIFO_READY		0x048
++#define DP_FIFO_RX_HEADER	0x050
++#define DP_FIFO_RX_DATA		0x054
++#define DP_IRQ_ENABLE		0x150
++#define DP_IRQ_STATUS		0x154
++#define DP_IRQ_CLEAR		0x158
++#define DP_MCU_REQUEST		0x22c
++#define DP_MCU_REPLY		0x230
++#define DP_IRQ_MCU_REQUEST	BIT(11)
++#define DP_IRQ_RESOURCE		BIT(9)
++#define DP_IRQ_TX_DONE		BIT(0)
++#define DP_IRQ_CONTROL_DONE	BIT(7)
++#define DP_IRQ_RX_READY		BIT(1)
++#define DP_RX_COUNT		GENMASK(29, 26)
++#define DP_RX_ERROR		BIT(15)
++#define DP_PACKET_TYPE		GENMASK(31, 28)
++#define DP_PACKET_COUNT		GENMASK(15, 8)
++#define DP_PACKET_AUX		0
++#define DP_PACKET_CONTROL	2
++#define DP_FIFO_TIMEOUT_US	100000
++#define DP_FIFO_MAX_PACKETS	32
++#define DP_MAILBOX_POLL_MS	2
++#define DP_CAPS_POLL_MS		20
++#define DP_CAPS_MAX_POLLS	500
++
++struct qcom_usb4_dp {
++	struct device *dev;
++	void __iomem *router;
++	struct device *display;
++	struct platform_device *child;
++	struct work_struct link_work;
++	bool connected;
++	bool stopping;
++	struct drm_dp_aux aux;
++	struct mutex lifecycle_lock;
++	struct mutex state_lock;
++	struct mutex fifo_lock;
++	struct mutex command_lock;
++	u32 pending_reply[2];
++	struct delayed_work mailbox_work;
++	struct delayed_work caps_work;
++	bool enabled;
++	bool allocated;
++	bool ready;
++	bool fifo_fault;
++	bool release_failed;
++	bool runtime_held;
++	unsigned int caps_polls;
++	unsigned int messages;
++	bool fec_trace;
++	unsigned int fec_trace_events;
++};
++
++static void __iomem *dp_base(struct qcom_usb4_dp *dp, unsigned int adapter)
++{
++	return dp->router + DP_AUX_BASE + adapter * DP_ADAPTER_STRIDE;
++}
++
++static bool dp_known_control(const u8 packet[4])
++{
++	switch (packet[1]) {
++	case 0x02:
++	case 0x03:
++	case 0x0c:
++	case 0x12:
++	case 0x16:
++	case 0x1d:
++		return true;
++	default:
++		return false;
++	}
++}
++
++/* fifo_lock held. Every observed packet is consumed exactly once. */
++static int dp_fifo_rx(struct qcom_usb4_dp *dp, unsigned int *type,
++		      u8 payload[20], unsigned int *count)
++{
++	void __iomem *base = dp_base(dp, 0);
++	u32 status = readl(base + DP_FIFO_RX_STATUS);
++	u32 header;
++	unsigned int i, raw_count;
++	int ret = 0;
++
++	if (!(status & DP_RX_COUNT))
++		return -EAGAIN;
++	header = readl(base + DP_FIFO_RX_HEADER);
++	*type = FIELD_GET(DP_PACKET_TYPE, header);
++	raw_count = FIELD_GET(DP_PACKET_COUNT, header);
++	if (status & DP_RX_ERROR) {
++		ret = -EIO;
++		goto consume;
++	}
++	if (*type == DP_PACKET_AUX) {
++		if (raw_count < 6 || raw_count > 25) {
++			ret = -EPROTO;
++			goto consume;
++		}
++		*count = raw_count - 5;
++	} else if (*type == DP_PACKET_CONTROL && raw_count == 4) {
++		*count = 4;
++	} else {
++		ret = -EPROTO;
++		goto consume;
++	}
++	for (i = 0; i < *count; i += 4)
++		put_unaligned_le32(readl(base + DP_FIFO_RX_DATA + i), payload + i);
++consume:
++	if (dp->fec_trace && dp->fec_trace_events < 64) {
++		dp->fec_trace_events++;
++		if (!ret)
++			dev_info(dp->dev, "FEC trace RX type=%u data=%*ph\n",
++				 *type, *count, payload);
++		else
++			dev_info(dp->dev, "FEC trace RX error=%d header=%#x status=%#x\n",
++				 ret, header, status);
++	}
++	/* Complete the payload reads before releasing the receive slot. */
++	mb();
++	writel(1, base + DP_FIFO_RX_CONSUME);
++	writel(DP_IRQ_RX_READY, base + DP_IRQ_CLEAR);
++	return ret;
++}
++
++/* A previous unmatched AUX reply cannot belong to a new transaction. */
++static int dp_fifo_drain(struct qcom_usb4_dp *dp)
++{
++	u8 payload[20];
++	unsigned int type, count, i;
++	int ret;
++
++	for (i = 0; i < DP_FIFO_MAX_PACKETS; i++) {
++		ret = dp_fifo_rx(dp, &type, payload, &count);
++		if (ret == -EAGAIN)
++			return 0;
++		if (ret)
++			return ret;
++		if (type != DP_PACKET_CONTROL || !dp_known_control(payload))
++			return -EPROTO;
++		dev_dbg(dp->dev, "DP control notification %*ph\n", 4, payload);
++	}
++	return -EOVERFLOW;
++}
++
++static int dp_fifo_tx(struct qcom_usb4_dp *dp, unsigned int type,
++		      const u8 *payload, unsigned int count)
++{
++	void __iomem *base = dp_base(dp, 0);
++	u8 padded[20] = {};
++	u32 status;
++	unsigned int i;
++
++	if (count > sizeof(padded))
++		return -EINVAL;
++	memcpy(padded, payload, count);
++	if (dp->fec_trace && dp->fec_trace_events < 64) {
++		dp->fec_trace_events++;
++		dev_info(dp->dev, "FEC trace TX type=%u data=%*ph\n",
++			 type, count, payload);
++	}
++	writel(DP_IRQ_TX_DONE | DP_IRQ_RX_READY, base + DP_IRQ_CLEAR);
++	for (i = 0; i < sizeof(padded); i += 4)
++		writel(get_unaligned_le32(padded + i), base + DP_FIFO_TX_DATA + i);
++	wmb();
++	writel(FIELD_PREP(DP_PACKET_TYPE, type) |
++	       FIELD_PREP(DP_PACKET_COUNT, count + (type == DP_PACKET_AUX ? 5 : 0)) |
++	       BIT(0), base + DP_FIFO_TX);
++	return readl_poll_timeout(base + DP_IRQ_STATUS, status,
++				  status & DP_IRQ_TX_DONE, 100, DP_FIFO_TIMEOUT_US);
++}
++
++static int dp_fifo_wait(struct qcom_usb4_dp *dp, unsigned int wanted_type,
++			int wanted_opcode, u8 payload[20], unsigned int *count)
++{
++	unsigned long deadline = jiffies + usecs_to_jiffies(DP_FIFO_TIMEOUT_US);
++	unsigned int type, packets = 0;
++	int ret;
++
++	do {
++		ret = dp_fifo_rx(dp, &type, payload, count);
++		if (ret == -EAGAIN) {
++			usleep_range(100, 200);
++			continue;
++		}
++		if (ret)
++			return ret;
++		if (type == wanted_type &&
++		    (wanted_type == DP_PACKET_AUX || payload[1] == wanted_opcode))
++			return 0;
++		if (type != DP_PACKET_CONTROL || !dp_known_control(payload))
++			return -EPROTO;
++		dev_dbg(dp->dev, "DP control while waiting: %*ph\n", 4, payload);
++		if (++packets >= DP_FIFO_MAX_PACKETS)
++			return -EOVERFLOW;
++	} while (time_before(jiffies, deadline));
++	return -ETIMEDOUT;
++}
++
++static int dp_fifo_fault(struct qcom_usb4_dp *dp, int ret)
++{
++	if (ret < 0) {
++		/* No transaction IDs exist: a late response after timeout cannot
++		 * safely be distinguished from a subsequent transaction's reply.
++		 */
++		WRITE_ONCE(dp->fifo_fault, true);
++		dev_err(dp->dev, "DP FIFO stopped after error %d; router reset required\n", ret);
++	}
++	return ret;
++}
++
++static int dp_control(void *ctx, const u8 tx[4], u8 rx[4])
++{
++	struct qcom_usb4_dp *dp = ctx;
++	void __iomem *base = dp_base(dp, 0);
++	u32 status;
++	u8 payload[20];
++	unsigned int count;
++	int ret;
++
++	mutex_lock(&dp->fifo_lock);
++	if (!READ_ONCE(dp->enabled) || !READ_ONCE(dp->allocated) ||
++	    READ_ONCE(dp->fifo_fault) ||
++	    READ_ONCE(dp->release_failed)) {
++		ret = -ENODEV;
++		goto out;
++	}
++	ret = dp_fifo_drain(dp);
++	if (ret)
++		goto fault;
++	/*
++	 * Windows clears and waits for control completion separately from TX.
++	 * Clear the prior completion before submission; AUX keeps its own path.
++	 */
++	writel(DP_IRQ_CONTROL_DONE, base + DP_IRQ_CLEAR);
++	ret = dp_fifo_tx(dp, DP_PACKET_CONTROL, tx, 4);
++	if (!ret)
++		ret = readl_poll_timeout(base + DP_IRQ_STATUS, status,
++					 status & DP_IRQ_CONTROL_DONE,
++					 100, DP_FIFO_TIMEOUT_US);
++	if (!ret && rx) {
++		ret = dp_fifo_wait(dp, DP_PACKET_CONTROL, tx[1], payload, &count);
++		if (!ret)
++			memcpy(rx, payload, 4);
++	}
++fault:
++	dp_fifo_fault(dp, ret);
++out:
++	mutex_unlock(&dp->fifo_lock);
++	return ret;
++}
++
++static ssize_t dp_aux_transfer(struct drm_dp_aux *aux, struct drm_dp_aux_msg *msg)
++{
++	struct qcom_usb4_dp *dp = container_of(aux, struct qcom_usb4_dp, aux);
++	u8 tx[20] = {}, rx[20];
++	unsigned int request = msg->request & ~DP_AUX_I2C_MOT;
++	unsigned int count, tx_count = 4;
++	bool read;
++	int ret;
++
++	if (!msg->size || msg->size > 16 || !msg->buffer || msg->address > 0xfffff)
++		return -EINVAL;
++	switch (request) {
++	case DP_AUX_NATIVE_READ:
++	case DP_AUX_I2C_READ:
++		read = true;
++		break;
++	case DP_AUX_NATIVE_WRITE:
++	case DP_AUX_I2C_WRITE:
++	case DP_AUX_I2C_WRITE_STATUS_UPDATE:
++		read = false;
++		break;
++	default:
++		return -EINVAL;
++	}
++	tx[0] = (msg->request << 4) | (msg->address >> 16);
++	tx[1] = msg->address >> 8;
++	tx[2] = msg->address;
++	tx[3] = msg->size - 1;
++	if (!read && request != DP_AUX_I2C_WRITE_STATUS_UPDATE) {
++		memcpy(tx + 4, msg->buffer, msg->size);
++		tx_count += msg->size;
++	}
++
++	mutex_lock(&dp->fifo_lock);
++	if (!READ_ONCE(dp->enabled) || !READ_ONCE(dp->allocated) ||
++	    READ_ONCE(dp->fifo_fault) || READ_ONCE(dp->release_failed)) {
++		ret = -ENODEV;
++		goto out;
++	}
++	ret = dp_fifo_drain(dp);
++	if (ret)
++		goto fault;
++	/* Diagnostic capture only: preserve AUX/control handling unchanged. */
++	if (request == DP_AUX_NATIVE_WRITE && msg->address == DP_FEC_CONFIGURATION)
++		dp->fec_trace = true;
++	ret = dp_fifo_tx(dp, DP_PACKET_AUX, tx, tx_count);
++	if (ret)
++		goto fault;
++	ret = dp_fifo_wait(dp, DP_PACKET_AUX, 0, rx, &count);
++	if (ret)
++		goto fault;
++	/* This FIFO carries the raw AUX reply byte, whose reply code is the
++	 * upper nibble (the same framing as its raw request header).
++	 */
++	if (rx[0] & 0x0f) {
++		ret = -EPROTO;
++		goto fault;
++	}
++	msg->reply = rx[0] >> 4;
++	if ((msg->reply & DP_AUX_NATIVE_REPLY_MASK) == DP_AUX_NATIVE_REPLY_MASK ||
++	    (msg->reply & DP_AUX_I2C_REPLY_MASK) == DP_AUX_I2C_REPLY_MASK) {
++		ret = -EPROTO;
++		goto fault;
++	}
++	if (msg->reply) {
++		ret = 0;
++		goto out;
++	}
++	if (read) {
++		if (count - 1 > msg->size) {
++			ret = -EPROTO;
++			goto fault;
++		}
++		memcpy(msg->buffer, rx + 1, count - 1);
++		ret = count - 1;
++	} else if (count == 1) {
++		ret = msg->size;
++	} else if (count == 2 && rx[1] <= msg->size) {
++		ret = rx[1];
++	} else {
++		ret = -EPROTO;
++		goto fault;
++	}
++	goto out;
++fault:
++	dp_fifo_fault(dp, ret);
++out:
++	mutex_unlock(&dp->fifo_lock);
++	return ret;
++}
++
++static int dp_dpsw(void *ctx, u32 command)
++{
++	struct qcom_usb4_dp *dp = ctx;
++	void __iomem *base = dp_base(dp, 0);
++	u32 value;
++	int ret;
++
++	mutex_lock(&dp->command_lock);
++	if (!READ_ONCE(dp->enabled) ||
++	    (command == 5 ? READ_ONCE(dp->allocated) : !READ_ONCE(dp->allocated)) ||
++	    READ_ONCE(dp->fifo_fault) || READ_ONCE(dp->release_failed) ||
++	    dp->pending_reply[0] ||
++	    readl(base + DP_MCU_REQUEST) || readl(base + DP_MCU_REPLY)) {
++		ret = -EBUSY;
++	} else {
++		writel(command, base + DP_MCU_REPLY);
++		ret = 0;
++	}
++	mutex_unlock(&dp->command_lock);
++	if (ret)
++		return ret;
++	/* Never hold the command lock while firmware may ask its display owner
++	 * for a resource. The mailbox worker must be able to send that reply.
++	 */
++	return readl_poll_timeout(base + DP_MCU_REPLY, value, !value,
++				  100, DP_FIFO_TIMEOUT_US);
++}
++
++static int dp_discover(struct qcom_usb4_dp *dp)
++{
++	int ret;
++
++	if (!READ_ONCE(dp->enabled))
++		return -ENODEV;
++	if (READ_ONCE(dp->allocated))
++		return -EALREADY;
++	/* The proven initial request causes firmware to ask its display owner
++	 * for allocation. A plain core resource query does not start this flow.
++	 */
++	ret = dp_dpsw(dp, 5);
++	if (ret)
++		dev_warn(dp->dev, "DP discovery command failed (%d); mailbox service retained, inspect usb4_dp before retrying discover\n", ret);
++	return ret;
++}
++
++static int dp_configure_link(void *ctx, unsigned int rate, unsigned int lanes)
++{
++	struct qcom_usb4_dp *dp = ctx;
++
++	return qcom_usb4_dp_configure_link(dp->router, dp_dpsw, dp, rate, lanes);
++}
++
++/* Called under the producer AUX mutex before training, with source FEC off. */
++static int dp_set_fec_ready(void *ctx, bool enable)
++{
++	struct qcom_usb4_dp *dp = ctx;
++	u8 ready, status, tx[4] = { enable, 0x0a, 0, 0 }, rx[4] = {};
++	int ret;
++
++	/* Receiver readiness may survive a previous stream or a host reset. */
++	ret = drm_dp_dpcd_read_byte(&dp->aux, DP_FEC_CONFIGURATION, &ready);
++	if (ret)
++		return ret;
++	/* Preserve the error-counter selection while changing readiness. */
++	ready = (ready & ~DP_FEC_READY) | (enable ? DP_FEC_READY : 0);
++	ret = drm_dp_dpcd_write_byte(&dp->aux, DP_FEC_CONFIGURATION, ready);
++	if (ret)
++		return ret;
++	ret = drm_dp_dpcd_read_byte(&dp->aux, DP_FEC_CONFIGURATION, &status);
++	if (ret)
++		return ret;
++	if (status != ready)
++		return -EIO;
++
++	/* FEC detection flags are latched W1C events, not current encoder state.
++	 * Require a fresh enable event from the next stream's FEC sequence.
++	 */
++	ret = drm_dp_dpcd_write_byte(&dp->aux, DP_FEC_STATUS,
++			DP_FEC_DECODE_EN_DETECTED | DP_FEC_DECODE_DIS_DETECTED);
++	if (ret)
++		return ret;
++	ret = drm_dp_dpcd_read_byte(&dp->aux, DP_FEC_STATUS, &status);
++	if (ret)
++		return ret;
++	if (status & (DP_FEC_DECODE_EN_DETECTED | DP_FEC_DECODE_DIS_DETECTED))
++		return -EIO;
++	dev_info(dp->dev, "USB4 FEC readiness prepared: ready=%#x status=%#x\n",
++		 ready, status);
++
++	/* USB4 2.0 section 10.4.9: SET_FEC_READY needs a matching
++	 * acknowledgment; its returned data bytes have no defined meaning.
++	 * Raw software AUX transactions do not drive the DPTX snooper.
++	 */
++	tx[0] = enable;
++	ret = dp_control(dp, tx, rx);
++	dev_dbg(dp->dev, "FEC readiness acknowledged: %d\n", ret);
++	return ret;
++}
++
++static int dp_train_link(void *ctx, unsigned int rate, unsigned int lanes)
++{
++	struct qcom_usb4_dp *dp = ctx;
++
++	return qcom_usb4_dp_train_link(dp->router, dp_control, dp, rate, lanes);
++}
++
++static const struct msm_dp_usb4_ops dp_producer_ops = {
++	.configure_link = dp_configure_link,
++	.train_link = dp_train_link,
++	.set_fec_ready = dp_set_fec_ready,
++};
++
++static void dp_caps_work(struct work_struct *work)
++{
++	struct qcom_usb4_dp *dp = container_of(to_delayed_work(work),
++					      struct qcom_usb4_dp, caps_work);
++	int ret;
++
++	if (!READ_ONCE(dp->enabled) || !READ_ONCE(dp->allocated) ||
++	    READ_ONCE(dp->ready) || READ_ONCE(dp->fifo_fault))
++		return;
++	if ((readl(dp->router + 0x6028) & GENMASK(31, 30)) != GENMASK(31, 30) ||
++	    !(readl(dp_base(dp, 0) + DP_FIFO_READY) & BIT(0))) {
++		if (++dp->caps_polls < DP_CAPS_MAX_POLLS)
++			queue_delayed_work(system_unbound_wq, &dp->caps_work,
++					   msecs_to_jiffies(DP_CAPS_POLL_MS));
++		else
++			dev_warn(dp->dev, "DP tunnel/AUX readiness deadline expired\n");
++		return;
++	}
++	ret = qcom_usb4_dp_negotiate_caps(dp->router, &dp->aux, dp_control, dp);
++	if (ret) {
++		dev_err(dp->dev, "DP receiver capability negotiation failed: %d\n", ret);
++		return;
++	}
++	mutex_lock(&dp->state_lock);
++	if (dp->enabled && dp->allocated) {
++		dp->ready = true;
++		ret = msm_dp_usb4_hpd(dp->display, true, false);
++		dev_info(dp->dev, "DP receiver ready; HPD queued: %d\n", ret);
++	}
++	mutex_unlock(&dp->state_lock);
++}
++
++static void dp_mailbox_work(struct work_struct *work)
++{
++	struct qcom_usb4_dp *dp = container_of(to_delayed_work(work),
++					      struct qcom_usb4_dp, mailbox_work);
++	unsigned int adapter;
++
++	if (!READ_ONCE(dp->enabled))
++		return;
++	for (adapter = 0; adapter < 2; adapter++) {
++		void __iomem *base = dp_base(dp, adapter);
++		u32 request, reply = 0;
++		bool release = false;
++		int ret = 0;
++
++		mutex_lock(&dp->command_lock);
++		if (readl(base + DP_MCU_REPLY)) {
++			mutex_unlock(&dp->command_lock);
++			continue;
++		}
++		if (dp->pending_reply[adapter]) {
++			writel(dp->pending_reply[adapter], base + DP_MCU_REPLY);
++			dp->pending_reply[adapter] = 0;
++			mutex_unlock(&dp->command_lock);
++			continue;
++		}
++		request = readl(base + DP_MCU_REQUEST);
++		if (!request) {
++			mutex_unlock(&dp->command_lock);
++			continue;
++		}
++		if (request != 0x1004 && request != 0x1104 &&
++		    request != 0x1204 && request != 0x2) {
++			mutex_unlock(&dp->command_lock);
++			dev_warn_ratelimited(dp->dev, "DP%u unknown request %#x left pending\n",
++					    adapter, request);
++			continue;
++		}
++		writel(DP_IRQ_MCU_REQUEST, base + DP_IRQ_CLEAR);
++		writel(0, base + DP_MCU_REQUEST);
++		/* Reserve this adapter's response slot while callbacks execute. */
++		dp->pending_reply[adapter] = U32_MAX;
++		mutex_unlock(&dp->command_lock);
++		mutex_lock(&dp->state_lock);
++		switch (request) {
++		case 0x1004:
++			reply = !adapter && !dp->allocated && !dp->fifo_fault && !dp->release_failed ?
++				0x1006 : 0x11006;
++			break;
++		case 0x1104:
++			if (!adapter && !dp->fifo_fault && !dp->release_failed) {
++				ret = msm_dp_usb4_route(dp->display, 1);
++				if (!ret) {
++					writel(readl(base + DP_IRQ_ENABLE) | DP_IRQ_RESOURCE,
++					       base + DP_IRQ_ENABLE);
++					dp->allocated = true;
++					dp->caps_polls = 0;
++					queue_delayed_work(system_unbound_wq, &dp->caps_work,
++							   msecs_to_jiffies(DP_CAPS_POLL_MS));
++				}
++			} else {
++				ret = -ENOSPC;
++			}
++			reply = ret ? 0x11106 : 0x1106;
++			break;
++		case 0x1204:
++			dev_info(dp->dev, "USB4 release: request adapter=%u allocated=%d ready=%d\n",
++				 adapter, dp->allocated, dp->ready);
++			if (!adapter && dp->allocated) {
++				dp->allocated = false;
++				dp->ready = false;
++				release = true;
++			}
++			reply = 0x1206;
++			break;
++		case 0x2:
++			/* Notification only; no opcode-6 response. */
++			break;
++		}
++		mutex_unlock(&dp->state_lock);
++		if (release) {
++			/* The capability worker takes state_lock at completion. Do
++			 * not hold it while draining work or stopping the producer.
++			 */
++			dev_info(dp->dev, "USB4 release: drain caps\n");
++			cancel_delayed_work_sync(&dp->caps_work);
++			dev_info(dp->dev, "USB4 release: HPD sync enter\n");
++			ret = msm_dp_usb4_hpd_sync(dp->display, false, false);
++			dev_info(dp->dev, "USB4 release: HPD sync return %d\n", ret);
++			if (!ret)
++				ret = msm_dp_usb4_route(dp->display, 0);
++			dev_info(dp->dev, "USB4 release: route return %d, clear resource\n", ret);
++			writel(readl(dp->router + 0x84078) & ~BIT(31),
++			       dp->router + 0x84078);
++			dev_info(dp->dev, "USB4 release: resource cleared\n");
++			mutex_lock(&dp->state_lock);
++			dp->release_failed = !!ret;
++			if (ret) {
++				dp->allocated = true;
++				/* Failure status uses the observed opcode-6 layout;
++				 * this negative release encoding is not hardware-tested.
++				 */
++				reply = 0x11206;
++				dev_warn(dp->dev, "DP release incomplete (%d); ownership retained\n", ret);
++			}
++			mutex_unlock(&dp->state_lock);
++		}
++		mutex_lock(&dp->command_lock);
++		dp->pending_reply[adapter] = reply;
++		if (reply && !readl(base + DP_MCU_REPLY)) {
++			wmb();
++			writel(reply, base + DP_MCU_REPLY);
++			dp->pending_reply[adapter] = 0;
++		}
++		mutex_unlock(&dp->command_lock);
++		if (release && !ret && !READ_ONCE(dp->stopping))
++			schedule_work(&dp->link_work);
++		dp->messages++;
++		dev_dbg(dp->dev, "DP%u request %#x reply %#x\n", adapter, request, reply);
++	}
++	if (READ_ONCE(dp->enabled))
++		queue_delayed_work(system_unbound_wq, &dp->mailbox_work,
++				   msecs_to_jiffies(DP_MAILBOX_POLL_MS));
++}
++
++/* A separate consumer lets DRM defer until its connector exists without
++ * deferring the host mux on which the Type-C display bridge itself depends.
++ * Only USB4/TBT link ownership creates this child; native DP keeps its AUX.
++ */
++static int qcom_usb4_dp_probe(struct platform_device *pdev)
++{
++	struct qcom_usb4_dp *dp = *(struct qcom_usb4_dp **)dev_get_platdata(&pdev->dev);
++	struct device_link *link;
++	int ret;
++
++	if (READ_ONCE(dp->stopping) || !READ_ONCE(dp->connected))
++		return -ENODEV;
++	ret = qcom_usb4_dp_enable(dp);
++	if (ret)
++		return dev_err_probe(&pdev->dev, ret, "display provider attachment failed\n");
++	link = device_link_add(&pdev->dev, dp->display, DL_FLAG_AUTOREMOVE_CONSUMER);
++	if (!link) {
++		qcom_usb4_dp_disable(dp, true);
++		return -ENOMEM;
++	}
++	platform_set_drvdata(pdev, dp);
++	return 0;
++}
++
++static void qcom_usb4_dp_remove(struct platform_device *pdev)
++{
++	qcom_usb4_dp_disable(platform_get_drvdata(pdev), true);
++}
++
++struct platform_driver qcom_usb4_dp_driver = {
++	.probe = qcom_usb4_dp_probe,
++	.remove = qcom_usb4_dp_remove,
++	.shutdown = qcom_usb4_dp_remove,
++	.driver.name = "qcom-usb4-dp",
++};
++
++static void qcom_usb4_dp_link_work(struct work_struct *work)
++{
++	struct qcom_usb4_dp *dp = container_of(work, struct qcom_usb4_dp, link_work);
++	struct platform_device *child;
++	int ret;
++
++	if (READ_ONCE(dp->stopping))
++		return;
++	if (READ_ONCE(dp->connected)) {
++		if (!dp->child) {
++			child = platform_device_register_data(dp->dev, "qcom-usb4-dp",
++					PLATFORM_DEVID_AUTO, &dp, sizeof(dp));
++			if (IS_ERR(child)) {
++				dev_err(dp->dev, "display child registration failed: %ld\n", PTR_ERR(child));
++				return;
++			}
++			dp->child = child;
++		} else if (READ_ONCE(dp->enabled) && !READ_ONCE(dp->allocated)) {
++			dp_discover(dp);
++		}
++		return;
++	}
++	/* Keep servicing firmware release until DRM has stopped the producer. */
++	ret = qcom_usb4_dp_disable(dp, false);
++	if (ret)
++		return;
++	if (dp->child) {
++		platform_device_unregister(dp->child);
++		dp->child = NULL;
++	}
++}
++
++void qcom_usb4_dp_set_connected(struct qcom_usb4_dp *dp, bool connected)
++{
++	if (!dp || READ_ONCE(dp->stopping))
++		return;
++	WRITE_ONCE(dp->connected, connected);
++	schedule_work(&dp->link_work);
++}
++
++void qcom_usb4_dp_stop(struct qcom_usb4_dp *dp)
++{
++	if (!dp)
++		return;
++	WRITE_ONCE(dp->stopping, true);
++	cancel_work_sync(&dp->link_work);
++	if (dp->child) {
++		platform_device_unregister(dp->child);
++		dp->child = NULL;
++	}
++	qcom_usb4_dp_disable(dp, true);
++}
++
++struct qcom_usb4_dp *qcom_usb4_dp_create(struct device *dev, void __iomem *router)
++{
++	struct qcom_usb4_dp *dp;
++
++	dp = devm_kzalloc(dev, sizeof(*dp), GFP_KERNEL);
++	if (!dp)
++		return ERR_PTR(-ENOMEM);
++	dp->dev = dev;
++	dp->router = router;
++	mutex_init(&dp->lifecycle_lock);
++	mutex_init(&dp->state_lock);
++	mutex_init(&dp->fifo_lock);
++	mutex_init(&dp->command_lock);
++	INIT_WORK(&dp->link_work, qcom_usb4_dp_link_work);
++	INIT_DELAYED_WORK(&dp->mailbox_work, dp_mailbox_work);
++	INIT_DELAYED_WORK(&dp->caps_work, dp_caps_work);
++	dp->aux.name = "Surface USB4 router0 DP-IN0";
++	dp->aux.dev = dev;
++	dp->aux.transfer = dp_aux_transfer;
++	dp->aux.no_zero_sized = true;
++	drm_dp_aux_init(&dp->aux);
++	return dp;
++}
++
++int qcom_usb4_dp_enable(struct qcom_usb4_dp *dp)
++{
++	unsigned int adapter;
++	int ret;
++
++	mutex_lock(&dp->lifecycle_lock);
++	if (dp->enabled) {
++		ret = -EALREADY;
++		goto out;
++	}
++	if (dp->fifo_fault) {
++		ret = -EIO;
++		goto out;
++	}
++	for (adapter = 0; adapter < 2; adapter++) {
++		if (readl(dp_base(dp, adapter) + DP_MCU_REPLY)) {
++			ret = -EBUSY;
++			goto out;
++		}
++	}
++	dp->display = bus_find_device_by_name(&platform_bus_type, NULL,
++					      "af54000.displayport-controller");
++	if (!dp->display) {
++		ret = -EPROBE_DEFER;
++		goto out;
++	}
++	ret = pm_runtime_resume_and_get(dp->dev);
++	if (ret < 0)
++		goto put_display;
++	dp->runtime_held = true;
++	ret = msm_dp_usb4_attach(dp->display, &dp->aux,
++				 &dp_producer_ops,
++				 dp);
++	if (ret)
++		goto put_runtime;
++	WRITE_ONCE(dp->enabled, true);
++	queue_delayed_work(system_unbound_wq, &dp->mailbox_work, 0);
++	dev_info(dp->dev, "DP0 mailbox owner and router AUX enabled\n");
++	/* Discovery failure does not undo the live owner. A later link event
++	 * can retry without creating an unbound child with active callbacks.
++	 */
++	dp_discover(dp);
++	ret = 0;
++	goto out;
++put_runtime:
++	pm_runtime_put(dp->dev);
++	dp->runtime_held = false;
++put_display:
++	put_device(dp->display);
++	dp->display = NULL;
++out:
++	mutex_unlock(&dp->lifecycle_lock);
++	return ret;
++}
++
++int qcom_usb4_dp_discover(struct qcom_usb4_dp *dp)
++{
++	int ret;
++
++	mutex_lock(&dp->lifecycle_lock);
++	ret = dp_discover(dp);
++	mutex_unlock(&dp->lifecycle_lock);
++	return ret;
++}
++
++int qcom_usb4_dp_disable(struct qcom_usb4_dp *dp, bool force)
++{
++	int ret = 0;
++
++	if (!dp)
++		return 0;
++	mutex_lock(&dp->lifecycle_lock);
++	if (!dp->enabled)
++		goto out;
++	mutex_lock(&dp->state_lock);
++	if (dp->allocated && !force) {
++		mutex_unlock(&dp->state_lock);
++		ret = -EBUSY;
++		goto out;
++	}
++	WRITE_ONCE(dp->enabled, false);
++	mutex_unlock(&dp->state_lock);
++	cancel_delayed_work_sync(&dp->mailbox_work);
++	cancel_delayed_work_sync(&dp->caps_work);
++	msm_dp_usb4_detach(dp->display);
++	msm_dp_usb4_route(dp->display, 0);
++	writel(readl(dp->router + 0x84078) & ~BIT(31), dp->router + 0x84078);
++	/* Detach has stopped producer transfers; drain direct AUX users too. */
++	mutex_lock(&dp->fifo_lock);
++	mutex_unlock(&dp->fifo_lock);
++	dp->allocated = false;
++	dp->ready = false;
++	if (dp->runtime_held) {
++		pm_runtime_put(dp->dev);
++		dp->runtime_held = false;
++	}
++	put_device(dp->display);
++	dp->display = NULL;
++	dev_info(dp->dev, "experimental DP mailbox owner disabled\n");
++out:
++	mutex_unlock(&dp->lifecycle_lock);
++	return ret;
++}
++
++bool qcom_usb4_dp_active(struct qcom_usb4_dp *dp)
++{
++	return dp && READ_ONCE(dp->enabled);
++}
++
++ssize_t qcom_usb4_dp_status(struct qcom_usb4_dp *dp, char *buf)
++{
++	return sysfs_emit(buf, "enabled %u allocated %u ready %u fifo_fault %u release_failed %u messages %u\n",
++			  READ_ONCE(dp->enabled), READ_ONCE(dp->allocated),
++			  READ_ONCE(dp->ready), READ_ONCE(dp->fifo_fault),
++			  READ_ONCE(dp->release_failed), READ_ONCE(dp->messages));
++}
+diff --git a/drivers/thunderbolt/qcom-usb4-dp.h b/drivers/thunderbolt/qcom-usb4-dp.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe17e5b9ca194e26a60390d5df80617275b3f361
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-dp.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef QCOM_USB4_DP_H
++#define QCOM_USB4_DP_H
++
++#include <linux/types.h>
++
++struct device;
++struct qcom_usb4_dp;
++struct platform_driver;
++extern struct platform_driver qcom_usb4_dp_driver;
++void qcom_usb4_dp_set_connected(struct qcom_usb4_dp *dp, bool connected);
++void qcom_usb4_dp_stop(struct qcom_usb4_dp *dp);
++
++struct qcom_usb4_dp *qcom_usb4_dp_create(struct device *dev, void __iomem *router);
++int qcom_usb4_dp_enable(struct qcom_usb4_dp *dp);
++int qcom_usb4_dp_discover(struct qcom_usb4_dp *dp);
++int qcom_usb4_dp_disable(struct qcom_usb4_dp *dp, bool force);
++bool qcom_usb4_dp_active(struct qcom_usb4_dp *dp);
++ssize_t qcom_usb4_dp_status(struct qcom_usb4_dp *dp, char *buf);
++
++#endif
+diff --git a/drivers/thunderbolt/qcom-usb4-drom.c b/drivers/thunderbolt/qcom-usb4-drom.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1937f30687e33d62f7d7e721ceb3dbc7d8ad86a
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-drom.c
+@@ -0,0 +1,51 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Original implementation of the inspected Qualcomm USB4 DROM wire format. */
++#include <linux/crc32.h>
++#include <linux/errno.h>
++#include <linux/string.h>
++#include <linux/unaligned.h>
++
++#include "qcom-usb4-drom.h"
++
++/* Revision/length, legacy IDs, adapter entries and product description. */
++static const u8 qcom_usb4_drom_data[QCOM_USB4_DROM_SIZE - 13] = {
++	0x01, 0x67, 0x00, 0x28, 0x03, 0x00, 0x00, 0x00, 0x00, 0x05, 0x86, 0x00,
++	0x00, 0x00, 0x05, 0x87, 0x00, 0x00, 0x00, 0x1e, 0x01, 0x51, 0x75, 0x61,
++	0x6c, 0x63, 0x6f, 0x6d, 0x6d, 0x20, 0x54, 0x65, 0x63, 0x68, 0x6e, 0x6f,
++	0x6c, 0x6f, 0x67, 0x69, 0x65, 0x73, 0x2c, 0x20, 0x49, 0x6e, 0x63, 0x2e,
++	0x00, 0x11, 0x02, 0x53, 0x6e, 0x61, 0x70, 0x64, 0x72, 0x61, 0x67, 0x6f,
++	0x6e, 0x20, 0x30, 0x31, 0x42, 0x00, 0x0f, 0x09, 0x10, 0x04, 0xc6, 0x05,
++	0x38, 0x09, 0x00, 0x00, 0xeb, 0x34, 0x00, 0x00, 0x00, 0x08, 0x82, 0x80,
++	0x03, 0x00, 0x00, 0x00, 0x00, 0x08, 0x83, 0x90, 0x02, 0x00, 0x00, 0x00,
++	0x00, 0x03, 0x84, 0x00, 0x03, 0x08, 0x06,
++};
++
++static u8 qcom_usb4_uid_crc(const u8 *data)
++{
++	u8 crc = 0xff;
++	unsigned int i, bit;
++
++	for (i = 0; i < 8; i++) {
++		crc ^= data[i];
++		for (bit = 0; bit < 8; bit++)
++			crc = (crc << 1) ^ ((crc & 0x80) ? 0x07 : 0);
++	}
++	return crc;
++}
++
++int qcom_usb4_drom_build(u8 *data, size_t size, u32 serial, u8 router)
++{
++	u64 uid;
++	u32 crc;
++
++	if (!data || size < QCOM_USB4_DROM_SIZE || router > 2)
++		return -EINVAL;
++
++	uid = (0x5c6ULL << 48) | ((u64)serial << 4) | router;
++	put_unaligned_le64(uid, data + 1);
++	data[0] = qcom_usb4_uid_crc(data + 1);
++	memcpy(data + 13, qcom_usb4_drom_data, sizeof(qcom_usb4_drom_data));
++	crc = ~crc32c(~0U, data + 13, sizeof(qcom_usb4_drom_data));
++	put_unaligned_le32(crc, data + 9);
++	return 0;
++}
+diff --git a/drivers/thunderbolt/qcom-usb4-drom.h b/drivers/thunderbolt/qcom-usb4-drom.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..1fa042ee73efca79199620dcddef6995cd3ad294
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-drom.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef QCOM_USB4_DROM_H
++#define QCOM_USB4_DROM_H
++
++#include <linux/types.h>
++
++#define QCOM_USB4_DROM_SIZE 116
++
++/*
++ * Build the descriptor format observed on the Surface Glymur router.
++ * serial must come from validated SoC information, not a guessed board ID.
++ * router is the hardware router index (0..2). This helper does not determine
++ * whether the descriptor's adapter topology applies to another chip.
++ * On error, data is unchanged. No hardware access is performed.
++ */
++int qcom_usb4_drom_build(u8 *data, size_t size, u32 serial, u8 router);
++
++#endif
+diff --git a/drivers/thunderbolt/qcom-usb4-events.c b/drivers/thunderbolt/qcom-usb4-events.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..1dcb575d13a648dfa547b10525674e085cf10972
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-events.c
+@@ -0,0 +1,55 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/errno.h>
++#include <linux/unaligned.h>
++
++#include "qcom-usb4-events.h"
++
++#define QCOM_USB4_EVENTS_HEADER_SIZE 16
++
++int qcom_usb4_events_decode(const u8 *snapshot, size_t size, u32 consumer,
++			    struct qcom_usb4_events *events)
++{
++	struct qcom_usb4_events decoded = {};
++	u32 layout, tail, head, i, j;
++
++	if (!snapshot || !events || size < QCOM_USB4_EVENTS_HEADER_SIZE)
++		return -EINVAL;
++
++	layout = get_unaligned_le32(snapshot);
++	decoded.capacity = layout & 0xffff;
++	decoded.stride = layout >> 16;
++	decoded.producer = get_unaligned_le32(snapshot + 4);
++	if (!decoded.capacity || !decoded.stride ||
++	    consumer >= decoded.capacity || decoded.producer >= decoded.capacity)
++		return -EINVAL;
++
++	/* Validate the entire ring, not just the unread portion; no size overflow. */
++	if (decoded.capacity > (size - QCOM_USB4_EVENTS_HEADER_SIZE) / decoded.stride)
++		return -EINVAL;
++
++	decoded.consumer = consumer;
++	decoded.auxiliary = get_unaligned_le32(snapshot + 8);
++	decoded.reserved = get_unaligned_le32(snapshot + 12);
++	if (decoded.producer >= consumer) {
++		tail = decoded.producer - consumer;
++		head = 0;
++	} else {
++		tail = decoded.capacity - consumer;
++		head = decoded.producer;
++	}
++	decoded.pending_modulo = tail + head;
++	decoded.spans[0].count = tail;
++	decoded.spans[1].count = head;
++	if (tail)
++		decoded.spans[0].data = snapshot + QCOM_USB4_EVENTS_HEADER_SIZE +
++			(size_t)consumer * decoded.stride;
++	if (head)
++		decoded.spans[1].data = snapshot + QCOM_USB4_EVENTS_HEADER_SIZE;
++	for (i = 0; i < 2; i++)
++		for (j = 0; j < decoded.spans[i].count; j++)
++			if (decoded.spans[i].data[(size_t)j * decoded.stride] == 4)
++				decoded.type4_records++;
++
++	*events = decoded;
++	return 0;
++}
+diff --git a/drivers/thunderbolt/qcom-usb4-events.h b/drivers/thunderbolt/qcom-usb4-events.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..0be8639633a1001d994cbc4e6d37e96d1d7ec888
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-events.h
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef QCOM_USB4_EVENTS_H
++#define QCOM_USB4_EVENTS_H
++
++#include <linux/types.h>
++
++struct qcom_usb4_event_span {
++	const u8 *data;
++	u32 count;
++};
++
++struct qcom_usb4_events {
++	u32 capacity;
++	u32 stride;
++	u32 producer;
++	u32 consumer;
++	u32 pending_modulo;
++	u32 auxiliary;
++	u32 reserved;
++	u32 type4_records;
++	/* Unread records in order: tail, then head. Empty spans have NULL data. */
++	struct qcom_usb4_event_span spans[2];
++};
++
++/*
++ * Decode the recovered MCU event format from a stable, ordinary-memory copy.
++ * snapshot must remain immutable and alive while the returned spans are used;
++ * it must not overlap events. This does not capture live shared RAM or MMIO.
++ * size is the accessible snapshot length. On error, events is unchanged.
++ *
++ * A caller must separately establish coherent publication and no producer
++ * overwrite. Every modulo count can conceal complete laps, including zero.
++ * producer is the next private cursor only after the caller consumes the
++ * spans; this helper neither updates a cursor nor writes a shared reader.
++ * auxiliary and reserved have unknown semantics and are left uninterpreted.
++ * Type 4 signals a Windows stop waiter, but supplies no proven freshness token
++ * or MCU/DMA halt guarantee. type4_records is only a record count.
++ */
++int qcom_usb4_events_decode(const u8 *snapshot, size_t size, u32 consumer,
++			    struct qcom_usb4_events *events);
++
++#endif
+diff --git a/drivers/thunderbolt/qcom-usb4-fw.c b/drivers/thunderbolt/qcom-usb4-fw.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..662b13ab2b899a4806972ce8ea4202bf2c77d227
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-fw.c
+@@ -0,0 +1,88 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Qualcomm USB4 MCU firmware record decoding.
++ *
++ * Each record is a little-endian u32 byte offset, a little-endian u32 word
++ * count, then that many little-endian u32 words. Records continue to EOF.
++ * This format was verified against the Surface 8480 driver package; there
++ * is no inferred file header, signature, or checksum field.
++ *
++ * This helper does not select firmware, reset the MCU, or access hardware.
++ * The caller must select the correct image, establish the actual RAM size,
++ * hold the MCU in the required loading state, and implement ordered writes.
++ */
++
++#include <linux/errno.h>
++#include <linux/unaligned.h>
++
++#include "qcom-usb4-fw.h"
++
++int qcom_usb4_fw_validate(const u8 *data, size_t size, size_t ram_size)
++{
++	size_t pos = 0;
++
++	if (!data || !size)
++		return -EINVAL;
++
++	while (pos < size) {
++		size_t bytes;
++		u32 offset, words;
++
++		if (size - pos < 8)
++			return -EINVAL;
++
++		offset = get_unaligned_le32(data + pos);
++		words = get_unaligned_le32(data + pos + 4);
++		pos += 8;
++
++		/* Bound multiplication and record traversal before doing either. */
++		if (words > (size - pos) / sizeof(u32))
++			return -EINVAL;
++		bytes = (size_t)words * sizeof(u32);
++
++		if (offset % sizeof(u32))
++			return -EINVAL;
++
++		/* Prevent the 32-bit destination arithmetic used by the transport. */
++		if (bytes > (u32)-1 - offset)
++			return -EOVERFLOW;
++
++		if (offset > ram_size || bytes > ram_size - offset)
++			return -EFBIG;
++
++		pos += bytes;
++	}
++
++	return 0;
++}
++
++int qcom_usb4_fw_upload(const u8 *data, size_t size, size_t ram_size,
++		       qcom_usb4_fw_write_word_t write_word, void *context)
++{
++	size_t pos = 0;
++	int ret;
++
++	if (!write_word)
++		return -EINVAL;
++
++	/* A bad later record must not leave a partially uploaded image. */
++	ret = qcom_usb4_fw_validate(data, size, ram_size);
++	if (ret)
++		return ret;
++
++	while (pos < size) {
++		u32 offset = get_unaligned_le32(data + pos);
++		u32 words = get_unaligned_le32(data + pos + 4);
++
++		pos += 8;
++		while (words--) {
++			ret = write_word(context, offset, get_unaligned_le32(data + pos));
++			if (ret)
++				return ret;
++			offset += sizeof(u32);
++			pos += sizeof(u32);
++		}
++	}
++
++	return 0;
++}
+diff --git a/drivers/thunderbolt/qcom-usb4-fw.h b/drivers/thunderbolt/qcom-usb4-fw.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0775f9eb4513de9db55c1bdfed57c350878e30f
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-fw.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef QCOM_USB4_FW_H
++#define QCOM_USB4_FW_H
++
++#include <linux/types.h>
++
++/*
++ * Offsets are relative to MCU RAM, not to the router's MMIO resource.
++ * The callback returns zero on success or a negative errno on failure.
++ * Keep the image bytes unchanged throughout upload, including callbacks.
++ * Transport failure stops further writes but may leave a partial image;
++ * the caller must keep the MCU stopped and perform its recovery sequence.
++ */
++typedef int (*qcom_usb4_fw_write_word_t)(void *context, u32 offset, u32 value);
++
++int qcom_usb4_fw_validate(const u8 *data, size_t size, size_t ram_size);
++int qcom_usb4_fw_upload(const u8 *data, size_t size, size_t ram_size,
++		       qcom_usb4_fw_write_word_t write_word, void *context);
++
++#endif
+diff --git a/drivers/thunderbolt/qcom-usb4-host.c b/drivers/thunderbolt/qcom-usb4-host.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..5facbe190cc0f5e4c391c209c198d91e499654ed
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-host.c
+@@ -0,0 +1,1247 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Qualcomm Glymur USB4 host router platform frontend.
++ *
++ * Bring-up driver for the Surface Laptop 8 (router 0). It connects the
++ * recovered cold-start sequence, the MCU firmware/mailbox helpers and the
++ * line-interrupt NHI adapter to the common Thunderbolt/USB4 core, and takes
++ * Type-C tunnelling requests from the platform's alternate-mode driver.
++ *
++ * Hardware startup failures keep the device bound so the Type-C mode switch
++ * stays registered (the alternate-mode driver depends on it) and the state
++ * is inspectable; the router is simply not brought up.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/clk.h>
++#include <linux/completion.h>
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/firmware.h>
++#include <linux/interconnect.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/mfd/syscon.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/phy/phy.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
++#include <linux/reset.h>
++#include <linux/slab.h>
++#include <linux/soc/qcom/glymur-usb4.h>
++#include <linux/soc/qcom/smem.h>
++#include <linux/soc/qcom/socinfo.h>
++#include <linux/usb/typec.h>
++#include <linux/usb/typec_mux.h>
++#include <linux/usb/typec_tbt.h>
++
++#include "nhi.h"
++#include "tb.h"
++#include "nhi_regs.h"
++#include "qcom-usb4-events.h"
++#include "qcom-usb4-dp.h"
++#include "qcom-usb4-mcu.h"
++#include "qcom-usb4-nhi.h"
++#include "qcom-usb4-startup.h"
++#include "qcom-usb4-typec.h"
++
++#define QCOM_USB4_ROUTER_SIZE		0x100000
++#define QCOM_USB4_NHI_OFFSET		0x3f000
++#define QCOM_USB4_MCU_RAM_OFFSET	0x13000
++#define QCOM_USB4_MCU_RAM_SIZE		0xf000
++#define QCOM_USB4_MCU_IRQ_ACK		0x22018
++#define QCOM_USB4_MCU_IRQ_ENABLE	0x2201c
++#define QCOM_USB4_ROUTER_STOP_FLAG	0x81018
++#define QCOM_USB4_TCSR_ROUTE		0xb004
++#define QCOM_USB4_MCU_STOP_COMMAND	4
++#define QCOM_USB4_STOP_TIMEOUT_MS	200
++#define QCOM_USB4_COMMAND_TIMEOUT_US	10000
++#define QCOM_USB4_SURFACE_PRESET	0x4421
++#define QCOM_USB4_SYS_READY_TIMEOUT_US	100000
++#define QCOM_USB4_MAX_ROUTERS		3
++
++/* Verified board facts: PS8830 board retimer on every Surface Laptop 8 port. */
++#define QCOM_USB4_SURFACE_BOARD_RETIMER	1
++
++#define QCOM_USB4_DDR_PEAK_BW		MBps_to_icc(5000)
++#define QCOM_USB4_APPS_PEAK_BW		MBps_to_icc(40)
++
++static bool qcom_startup = true;
++module_param_named(qcom_startup, qcom_startup, bool, 0444);
++MODULE_PARM_DESC(qcom_startup, "Bring up the Qualcomm USB4 router at probe (default: true)");
++
++enum qcom_usb4_pin_state {
++	QCOM_USB4_PIN_RX_PREPARE,
++	QCOM_USB4_PIN_TXB_PREPARE,
++	QCOM_USB4_PIN_TXA_PREPARE,
++	QCOM_USB4_PIN_RX_ACTIVE,
++	QCOM_USB4_PIN_TXB_ACTIVE,
++	QCOM_USB4_PIN_TXA_ACTIVE,
++	QCOM_USB4_PIN_COUNT,
++};
++
++static const char *const qcom_usb4_pin_names[QCOM_USB4_PIN_COUNT] = {
++	[QCOM_USB4_PIN_RX_PREPARE] = "rx-prepare",
++	[QCOM_USB4_PIN_TXB_PREPARE] = "txb-prepare",
++	[QCOM_USB4_PIN_TXA_PREPARE] = "txa-prepare",
++	[QCOM_USB4_PIN_RX_ACTIVE] = "rx-active",
++	[QCOM_USB4_PIN_TXB_ACTIVE] = "txb-active",
++	[QCOM_USB4_PIN_TXA_ACTIVE] = "txa-active",
++};
++
++enum qcom_usb4_link_request {
++	QCOM_USB4_LINK_NONE,
++	QCOM_USB4_LINK_CONNECT,
++	QCOM_USB4_LINK_DISCONNECT,
++};
++
++struct qcom_usb4_host {
++	struct device *dev;
++	unsigned int port;
++	void __iomem *router;
++
++	struct qcom_usb4_nhi qnhi;
++	struct qcom_usb4_mcu mcu;
++	struct qcom_usb4_start_state start_state;
++	struct qcom_usb4_dp *dp;
++
++	struct clk_bulk_data *clks;
++	bool *clk_enabled;
++	int num_clks;
++	struct reset_control *router_reset;
++	struct reset_control *phy_reset;
++	struct reset_control *dp_reset;
++	struct pinctrl *pinctrl;
++	struct pinctrl_state *pins[QCOM_USB4_PIN_COUNT];
++	struct regmap *tcsr;
++	struct phy *phy;
++	struct icc_path *icc_ddr;
++	struct icc_path *icc_apps;
++	const struct firmware *fw;
++	u32 serial;
++	int nhi_irq;
++	int mcu_irq;
++
++	struct typec_switch_dev *sw;
++	struct typec_mux_dev *mux;
++
++	/* Serializes link requests, mailbox commands and lifecycle changes. */
++	struct mutex lock;
++	enum typec_orientation orientation;
++	enum qcom_usb4_link_request pending;
++	u32 pending_command;
++	bool connected;
++
++	bool started;
++	bool nhi_probed;
++	bool phy_initialized;
++	bool mcu_irq_enabled;
++	bool runtime_held;
++
++	struct completion stop_event;
++	u32 event_consumer;
++};
++
++static struct qcom_usb4_host *qcom_usb4_hosts[QCOM_USB4_MAX_ROUTERS];
++static DEFINE_MUTEX(qcom_usb4_hosts_lock);
++
++static struct qcom_usb4_host *qcom_usb4_host_from_dev(struct device *dev)
++{
++	struct qcom_usb4_host *host = NULL;
++	unsigned int i;
++
++	mutex_lock(&qcom_usb4_hosts_lock);
++	for (i = 0; i < QCOM_USB4_MAX_ROUTERS; i++) {
++		if (qcom_usb4_hosts[i] && qcom_usb4_hosts[i]->dev == dev) {
++			host = qcom_usb4_hosts[i];
++			break;
++		}
++	}
++	mutex_unlock(&qcom_usb4_hosts_lock);
++	return host;
++}
++
++static struct qcom_usb4_host *qcom_usb4_host_from_nhi(struct tb_nhi *nhi)
++{
++	struct qcom_usb4_nhi *qnhi = container_of(nhi, struct qcom_usb4_nhi, nhi);
++
++	return container_of(qnhi, struct qcom_usb4_host, qnhi);
++}
++
++/* Router window access for the startup sequencer. */
++
++static int qcom_usb4_host_read_router(void *ctx, u32 offset, u32 *value)
++{
++	struct qcom_usb4_host *host = ctx;
++
++	if (offset % sizeof(u32) || offset > QCOM_USB4_ROUTER_SIZE - sizeof(u32))
++		return -EINVAL;
++	*value = readl(host->router + offset);
++	return 0;
++}
++
++static int qcom_usb4_host_update_router(void *ctx, u32 offset, u32 mask, u32 value)
++{
++	struct qcom_usb4_host *host = ctx;
++	u32 reg;
++
++	if (offset % sizeof(u32) || offset > QCOM_USB4_ROUTER_SIZE - sizeof(u32))
++		return -EINVAL;
++	reg = readl(host->router + offset);
++	writel((reg & ~mask) | (value & mask), host->router + offset);
++	return 0;
++}
++
++static void qcom_usb4_host_delay_us(void *ctx, unsigned int usec)
++{
++	if (usec < 20)
++		udelay(usec);
++	else
++		usleep_range(usec, usec + usec / 10 + 10);
++}
++
++static int qcom_usb4_host_owner_check(void *ctx, const struct qcom_usb4_start_config *cfg)
++{
++	struct qcom_usb4_host *host = ctx;
++
++	if (!host->fw || cfg->firmware != host->fw->data)
++		return -EINVAL;
++	if (host->phy_initialized || host->started)
++		return -EBUSY;
++	/* Cold start only: a running MCU means a prior owner left it active. */
++	if (readl(host->router + host->mcu.control_offset) & BIT(0))
++		return -EBUSY;
++	return 0;
++}
++
++static int qcom_usb4_host_select_pins(struct qcom_usb4_host *host,
++				      enum qcom_usb4_pin_state state)
++{
++	return pinctrl_select_state(host->pinctrl, host->pins[state]);
++}
++
++static int qcom_usb4_host_provider(void *ctx, enum qcom_usb4_start_step step,
++				   const struct qcom_usb4_start_config *cfg)
++{
++	struct qcom_usb4_host *host = ctx;
++	int ret;
++
++	switch (step) {
++	case QCOM_USB4_START_RX_PAD_PREPARE:
++		return qcom_usb4_host_select_pins(host, QCOM_USB4_PIN_RX_PREPARE);
++	case QCOM_USB4_START_TX_B_PAD_PREPARE:
++		return qcom_usb4_host_select_pins(host, QCOM_USB4_PIN_TXB_PREPARE);
++	case QCOM_USB4_START_TX_A_PAD_PREPARE:
++		return qcom_usb4_host_select_pins(host, QCOM_USB4_PIN_TXA_PREPARE);
++	case QCOM_USB4_START_RX_CLOCKS_REFERENCE:
++		return glymur_gcc_usb4_rx_select(host->port, false);
++	case QCOM_USB4_START_USB4_RESET_ASSERT:
++		return reset_control_assert(host->router_reset);
++	case QCOM_USB4_START_COMBO_RESET_ASSERT:
++		return reset_control_assert(host->phy_reset);
++	case QCOM_USB4_START_DP_RESET_ASSERT:
++		/*
++		 * Cold-start policy: the captured driver skips this only when a
++		 * DP tunnel clock is already active, which cannot be the case
++		 * before the first startup on this owner.
++		 */
++		return reset_control_assert(host->dp_reset);
++	case QCOM_USB4_START_DP_RESET_DEASSERT:
++		return reset_control_deassert(host->dp_reset);
++	case QCOM_USB4_START_COMBO_RESET_DEASSERT:
++		return reset_control_deassert(host->phy_reset);
++	case QCOM_USB4_START_USB4_RESET_DEASSERT:
++		return reset_control_deassert(host->router_reset);
++	case QCOM_USB4_START_CLOCK_READY:
++		/*
++		 * Explicit Linux policy: the captured check is a dead predicate.
++		 * Wait a bounded time for the SYS branch to report running, but
++		 * do not fail the cold start on a timeout; log it instead.
++		 */
++		ret = glymur_gcc_usb4_sys_ready(host->port, QCOM_USB4_SYS_READY_TIMEOUT_US);
++		if (ret == -ETIMEDOUT) {
++			dev_warn(host->dev, "SYS clock not reported running after reset\n");
++			return 0;
++		}
++		return ret;
++	case QCOM_USB4_START_RX_CLOCKS_PHY:
++		return glymur_gcc_usb4_rx_select(host->port, true);
++	case QCOM_USB4_START_RX_PAD_ACTIVE:
++		return qcom_usb4_host_select_pins(host, QCOM_USB4_PIN_RX_ACTIVE);
++	case QCOM_USB4_START_TX_B_PAD_ACTIVE:
++		return qcom_usb4_host_select_pins(host, QCOM_USB4_PIN_TXB_ACTIVE);
++	case QCOM_USB4_START_TX_A_PAD_ACTIVE:
++		return qcom_usb4_host_select_pins(host, QCOM_USB4_PIN_TXA_ACTIVE);
++	case QCOM_USB4_START_GCC_600C0_BIT3_SET:
++		return glymur_gcc_usb4_ctrl_bit(host->port, true);
++	case QCOM_USB4_START_GCC_600C0_BIT3_CLEAR:
++		return glymur_gcc_usb4_ctrl_bit(host->port, false);
++	case QCOM_USB4_START_SYS_MEMORY_FORCE:
++		return glymur_gcc_usb4_sys_force_mem(host->port, true);
++	case QCOM_USB4_START_TCSR_ROUTE:
++		return regmap_update_bits(host->tcsr, QCOM_USB4_TCSR_ROUTE,
++					  BIT(host->port), BIT(host->port));
++	case QCOM_USB4_START_PIPE_HWCG_OFF:
++		return glymur_gcc_usb4_pipe_hwcg(host->port, false);
++	case QCOM_USB4_START_PHY_COMPOSITE:
++		ret = phy_set_mode_ext(host->phy, PHY_MODE_TBT, PHY_SUBMODE_USB4);
++		if (ret)
++			return ret;
++		ret = phy_init(host->phy);
++		if (ret)
++			return ret;
++		host->phy_initialized = true;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static const struct qcom_usb4_start_ops qcom_usb4_host_start_ops = {
++	.owner_check = qcom_usb4_host_owner_check,
++	.provider = qcom_usb4_host_provider,
++	.read_router = qcom_usb4_host_read_router,
++	.update_router = qcom_usb4_host_update_router,
++	.delay_us = qcom_usb4_host_delay_us,
++};
++
++/* MCU event notification interrupt (third router interrupt). */
++
++static irqreturn_t qcom_usb4_host_mcu_irq(int irq, void *data)
++{
++	struct qcom_usb4_host *host = data;
++	struct qcom_usb4_events events;
++	void __iomem *shared;
++	u32 layout, capacity, stride, producer, aux;
++	size_t need, avail;
++	unsigned int i, j;
++	u8 *snapshot;
++	int ret;
++
++	if (!host->mcu_irq_enabled)
++		return IRQ_HANDLED;
++
++	shared = host->router + QCOM_USB4_MCU_RAM_OFFSET + host->start_state.shared_offset;
++	producer = readl(shared + 4);
++	aux = readl(shared + 8);
++	/* Captured order: read producer state, then acknowledge, then drain. */
++	writel(1, host->router + QCOM_USB4_MCU_IRQ_ACK);
++
++	layout = readl(shared);
++	capacity = layout & 0xffff;
++	stride = layout >> 16;
++	avail = QCOM_USB4_MCU_RAM_SIZE - host->start_state.shared_offset;
++	if (!capacity || !stride || capacity > (avail - 16) / stride) {
++		dev_warn_ratelimited(host->dev, "MCU event ring geometry invalid: %#x\n", layout);
++		return IRQ_HANDLED;
++	}
++	need = 16 + (size_t)capacity * stride;
++	snapshot = kmalloc(need, GFP_KERNEL);
++	if (!snapshot)
++		return IRQ_HANDLED;
++	memcpy_fromio(snapshot, shared, need);
++
++	ret = qcom_usb4_events_decode(snapshot, need, host->event_consumer, &events);
++	if (ret) {
++		dev_warn_ratelimited(host->dev,
++				     "MCU event decode failed (%d): producer %u aux %u consumer %u\n",
++				     ret, producer, aux, host->event_consumer);
++		goto out;
++	}
++
++	for (i = 0; i < 2; i++) {
++		for (j = 0; j < events.spans[i].count; j++) {
++			const u8 *rec = events.spans[i].data + (size_t)j * stride;
++
++			if (rec[0] == 1 && stride > 2)
++				dev_info(host->dev, "MCU event type 1: %c %.*s\n", rec[1],
++					 (int)stride - 2, rec + 2);
++			else
++				dev_info(host->dev, "MCU event type %u: %*ph\n", rec[0],
++					 (int)min_t(u32, stride, 16), rec);
++		}
++	}
++	host->event_consumer = events.producer;
++	if (events.type4_records)
++		complete(&host->stop_event);
++out:
++	kfree(snapshot);
++	return IRQ_HANDLED;
++}
++
++/* Type-C link requests from the platform alternate-mode driver. */
++
++static int qcom_usb4_host_send_command(struct qcom_usb4_host *host, u32 command,
++				       const char *what)
++{
++	int ret;
++
++	ret = qcom_usb4_mcu_command(&host->mcu, command, QCOM_USB4_COMMAND_TIMEOUT_US);
++	if (ret)
++		dev_err(host->dev, "%s command %#010x failed: %d\n", what, command, ret);
++	else
++		dev_info(host->dev, "%s command %#010x acknowledged\n", what, command);
++	return ret;
++}
++
++static void qcom_usb4_host_apply_link(struct qcom_usb4_host *host)
++{
++	lockdep_assert_held(&host->lock);
++
++	if (!host->started)
++		return;
++
++	switch (host->pending) {
++	case QCOM_USB4_LINK_CONNECT:
++		if (!qcom_usb4_host_send_command(host, host->pending_command, "connect"))
++			host->connected = true;
++		break;
++	case QCOM_USB4_LINK_DISCONNECT:
++		if (host->connected &&
++		    !qcom_usb4_host_send_command(host, host->pending_command, "disconnect"))
++			host->connected = false;
++		break;
++	default:
++		break;
++	}
++	qcom_usb4_dp_set_connected(host->dp, host->connected);
++	host->pending = QCOM_USB4_LINK_NONE;
++}
++
++static int qcom_usb4_host_switch_set(struct typec_switch_dev *sw,
++				     enum typec_orientation orientation)
++{
++	struct qcom_usb4_host *host = typec_switch_get_drvdata(sw);
++
++	mutex_lock(&host->lock);
++	host->orientation = orientation;
++	mutex_unlock(&host->lock);
++	return 0;
++}
++
++static int qcom_usb4_host_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state)
++{
++	struct qcom_usb4_host *host = typec_mux_get_drvdata(mux);
++	enum qcom_usb4_link_request request = QCOM_USB4_LINK_DISCONNECT;
++	u32 command;
++	int ret;
++
++	mutex_lock(&host->lock);
++	if (!state->alt && state->mode == TYPEC_MODE_USB4 && state->data) {
++		ret = qcom_usb4_typec_usb4_command(state->data, host->orientation,
++						   QCOM_USB4_SURFACE_BOARD_RETIMER, &command);
++		request = QCOM_USB4_LINK_CONNECT;
++	} else if (state->alt && state->alt->svid == USB_TYPEC_TBT_SID && state->data) {
++		ret = qcom_usb4_typec_tbt_command(state->data, host->orientation,
++						  QCOM_USB4_SURFACE_BOARD_RETIMER, &command);
++		request = QCOM_USB4_LINK_CONNECT;
++	} else if (state->mode == TYPEC_STATE_USB && !state->alt) {
++		/*
++		 * The UCSI driver also sets the plain USB state on the port when
++		 * a partner registers; that is not a firmware mux change. Only the
++		 * alternate-mode driver's safe state or a DP alternate mode ends
++		 * a tunnel, so leave an established connection alone here.
++		 */
++		dev_dbg(host->dev, "Type-C USB state, connection %s\n",
++			host->connected ? "kept" : "absent");
++		mutex_unlock(&host->lock);
++		return 0;
++	} else {
++		ret = qcom_usb4_typec_disconnect_command(&command);
++	}
++	if (ret) {
++		const struct enter_usb_data *eudo = state->data;
++
++		dev_warn(host->dev,
++			 "unsupported Type-C request (mode %lu, orientation %d, svid %#x, eudo %#x): %d\n",
++			 state->mode, host->orientation, state->alt ? state->alt->svid : 0,
++			 (!state->alt && state->data) ? eudo->eudo : 0, ret);
++		mutex_unlock(&host->lock);
++		return 0;
++	}
++	dev_info(host->dev, "Type-C request: mode %lu orientation %d -> %s %#010x%s\n",
++		 state->mode, host->orientation,
++		 request == QCOM_USB4_LINK_CONNECT ? "connect" : "disconnect",
++		 command, host->started ? "" : " (deferred until router startup)");
++	host->pending = request;
++	host->pending_command = command;
++	qcom_usb4_host_apply_link(host);
++	mutex_unlock(&host->lock);
++	return 0;
++}
++
++static void qcom_usb4_host_typec_unregister(void *data)
++{
++	struct qcom_usb4_host *host = data;
++
++	typec_mux_unregister(host->mux);
++	typec_switch_unregister(host->sw);
++}
++
++static int qcom_usb4_host_typec_register(struct qcom_usb4_host *host)
++{
++	struct typec_switch_desc sw_desc = {
++		.fwnode = dev_fwnode(host->dev),
++		.set = qcom_usb4_host_switch_set,
++		.drvdata = host,
++	};
++	struct typec_mux_desc mux_desc = {
++		.fwnode = dev_fwnode(host->dev),
++		.set = qcom_usb4_host_mux_set,
++		.drvdata = host,
++	};
++
++	host->sw = typec_switch_register(host->dev, &sw_desc);
++	if (IS_ERR(host->sw))
++		return dev_err_probe(host->dev, PTR_ERR(host->sw),
++				     "failed to register orientation switch\n");
++	host->mux = typec_mux_register(host->dev, &mux_desc);
++	if (IS_ERR(host->mux)) {
++		typec_switch_unregister(host->sw);
++		return dev_err_probe(host->dev, PTR_ERR(host->mux),
++				     "failed to register mode switch\n");
++	}
++	return devm_add_action_or_reset(host->dev, qcom_usb4_host_typec_unregister, host);
++}
++
++/* Hardware shutdown: recovered normal stop order. */
++
++static void qcom_usb4_host_stop_hardware(struct qcom_usb4_host *host)
++{
++	int ret;
++
++	qcom_usb4_dp_stop(host->dp);
++	mutex_lock(&host->lock);
++	if (host->start_state.phase == QCOM_USB4_START_COMPLETE) {
++		qcom_usb4_host_update_router(host, QCOM_USB4_ROUTER_STOP_FLAG, BIT(0), 0);
++		reinit_completion(&host->stop_event);
++		ret = qcom_usb4_mcu_command(&host->mcu, QCOM_USB4_MCU_STOP_COMMAND,
++					    QCOM_USB4_COMMAND_TIMEOUT_US);
++		if (ret)
++			dev_warn(host->dev, "MCU stop command failed: %d\n", ret);
++		else if (host->mcu_irq_enabled &&
++			 !wait_for_completion_timeout(&host->stop_event,
++						      msecs_to_jiffies(QCOM_USB4_STOP_TIMEOUT_MS)))
++			dev_warn(host->dev, "no MCU stop event within %u ms\n",
++				 QCOM_USB4_STOP_TIMEOUT_MS);
++		qcom_usb4_mcu_stop(&host->mcu);
++	}
++	if (host->mcu_irq_enabled) {
++		qcom_usb4_host_update_router(host, QCOM_USB4_MCU_IRQ_ENABLE, BIT(0), 0);
++		host->mcu_irq_enabled = false;
++	}
++	if (host->phy_initialized) {
++		ret = phy_exit(host->phy);
++		if (ret)
++			dev_warn(host->dev, "USB4 PHY exit failed: %d\n", ret);
++		host->phy_initialized = false;
++	}
++	if (host->start_state.phase != QCOM_USB4_START_NEW) {
++		glymur_gcc_usb4_rx_select(host->port, false);
++		regmap_update_bits(host->tcsr, QCOM_USB4_TCSR_ROUTE, BIT(host->port), 0);
++		/*
++		 * Hold the router block in reset once it is stopped: a wedged
++		 * firmware otherwise keeps the block busy, the clocks cannot be
++		 * gated ("status stuck at on") and the next start finds them
++		 * stuck off. The startup sequencer asserts and releases the
++		 * resets itself, so leaving it asserted here is safe.
++		 */
++		ret = reset_control_assert(host->router_reset);
++		if (ret)
++			dev_warn(host->dev, "router reset assert at stop failed: %d\n", ret);
++	}
++	host->started = false;
++	host->connected = false;
++	mutex_unlock(&host->lock);
++}
++
++static void qcom_usb4_host_nhi_shutdown(struct tb_nhi *nhi)
++{
++	struct qcom_usb4_host *host = qcom_usb4_host_from_nhi(nhi);
++
++	qcom_usb4_nhi_shutdown(nhi);
++	qcom_usb4_host_stop_hardware(host);
++}
++
++static int qcom_usb4_host_runtime_suspend(struct tb_nhi *nhi)
++{
++	/* No validated router suspend sequence yet: stay active. */
++	return -EBUSY;
++}
++
++static const struct tb_nhi_ops qcom_usb4_host_nhi_ops = {
++	.init_interrupts = qcom_usb4_nhi_init_interrupts,
++	.request_ring_irq = qcom_usb4_nhi_request_ring_irq,
++	.release_ring_irq = qcom_usb4_nhi_release_ring_irq,
++	.ring_interrupt_mask = qcom_usb4_nhi_ring_interrupt_mask,
++	.disable_interrupts = qcom_usb4_nhi_disable_interrupts,
++	.runtime_suspend = qcom_usb4_host_runtime_suspend,
++	.shutdown = qcom_usb4_host_nhi_shutdown,
++};
++
++/* Resources. */
++
++static int qcom_usb4_host_get_serial(struct qcom_usb4_host *host)
++{
++	struct socinfo *info;
++	size_t size;
++
++	info = qcom_smem_get(QCOM_SMEM_HOST_ANY, SMEM_HW_SW_BUILD_ID, &size);
++	if (IS_ERR(info))
++		return dev_err_probe(host->dev, PTR_ERR(info), "SoC info unavailable\n");
++	if (offsetofend(struct socinfo, serial_num) > size)
++		return dev_err_probe(host->dev, -ENODEV, "SoC info lacks a serial number\n");
++	host->serial = le32_to_cpu(info->serial_num);
++	if (!host->serial)
++		return dev_err_probe(host->dev, -ENODEV, "SoC serial number is zero\n");
++	return 0;
++}
++
++static int qcom_usb4_host_get_resources(struct qcom_usb4_host *host)
++{
++	struct platform_device *pdev = to_platform_device(host->dev);
++	struct device *dev = host->dev;
++	struct resource *res;
++	unsigned int i;
++	int ret;
++
++	host->router = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
++	if (IS_ERR(host->router))
++		return PTR_ERR(host->router);
++	if (resource_size(res) < QCOM_USB4_ROUTER_SIZE)
++		return dev_err_probe(dev, -EINVAL, "router window smaller than %#x\n",
++				     QCOM_USB4_ROUTER_SIZE);
++
++	host->nhi_irq = platform_get_irq_byname(pdev, "nhi");
++	if (host->nhi_irq < 0)
++		return host->nhi_irq;
++	host->mcu_irq = platform_get_irq_byname(pdev, "mcu");
++	if (host->mcu_irq < 0)
++		return host->mcu_irq;
++
++	host->num_clks = devm_clk_bulk_get_all(dev, &host->clks);
++	if (host->num_clks <= 0)
++		return dev_err_probe(dev, host->num_clks ?: -ENOENT, "no clocks\n");
++	host->clk_enabled = devm_kcalloc(dev, host->num_clks, sizeof(bool), GFP_KERNEL);
++	if (!host->clk_enabled)
++		return -ENOMEM;
++
++	host->router_reset = devm_reset_control_get_exclusive(dev, "router");
++	if (IS_ERR(host->router_reset))
++		return dev_err_probe(dev, PTR_ERR(host->router_reset), "router reset\n");
++	host->phy_reset = devm_reset_control_get_exclusive(dev, "phy");
++	if (IS_ERR(host->phy_reset))
++		return dev_err_probe(dev, PTR_ERR(host->phy_reset), "phy reset\n");
++	host->dp_reset = devm_reset_control_get_exclusive(dev, "dp");
++	if (IS_ERR(host->dp_reset))
++		return dev_err_probe(dev, PTR_ERR(host->dp_reset), "dp reset\n");
++
++	host->pinctrl = devm_pinctrl_get(dev);
++	if (IS_ERR(host->pinctrl))
++		return dev_err_probe(dev, PTR_ERR(host->pinctrl), "pinctrl\n");
++	for (i = 0; i < QCOM_USB4_PIN_COUNT; i++) {
++		host->pins[i] = pinctrl_lookup_state(host->pinctrl, qcom_usb4_pin_names[i]);
++		if (IS_ERR(host->pins[i]))
++			return dev_err_probe(dev, PTR_ERR(host->pins[i]),
++					     "pinctrl state %s\n", qcom_usb4_pin_names[i]);
++	}
++
++	host->tcsr = syscon_regmap_lookup_by_phandle(dev->of_node, "qcom,tcsr");
++	if (IS_ERR(host->tcsr))
++		return dev_err_probe(dev, PTR_ERR(host->tcsr), "TCSR syscon\n");
++
++	host->phy = devm_phy_get(dev, "usb4");
++	if (IS_ERR(host->phy))
++		return dev_err_probe(dev, PTR_ERR(host->phy), "USB4 PHY\n");
++
++	host->icc_ddr = devm_of_icc_get(dev, "usb4-ddr");
++	if (IS_ERR(host->icc_ddr))
++		return dev_err_probe(dev, PTR_ERR(host->icc_ddr), "usb4-ddr interconnect\n");
++	host->icc_apps = devm_of_icc_get(dev, "apps-usb4");
++	if (IS_ERR(host->icc_apps))
++		return dev_err_probe(dev, PTR_ERR(host->icc_apps), "apps-usb4 interconnect\n");
++
++	ret = qcom_usb4_host_get_serial(host);
++	if (ret)
++		return ret;
++
++	ret = qcom_usb4_mcu_init(&host->mcu, host->router, QCOM_USB4_ROUTER_SIZE,
++				 QCOM_USB4_MCU_RAM_SIZE, QCOM_USB4_MCU_LEGACY);
++	if (ret)
++		return dev_err_probe(dev, ret, "MCU layout\n");
++
++	return dma_set_mask_and_coherent(dev, DMA_BIT_MASK(40));
++}
++
++static void qcom_usb4_host_clocks_disable(struct qcom_usb4_host *host)
++{
++	int i;
++
++	for (i = host->num_clks - 1; i >= 0; i--) {
++		if (host->clk_enabled[i]) {
++			clk_disable_unprepare(host->clks[i].clk);
++			host->clk_enabled[i] = false;
++		}
++	}
++}
++
++static void qcom_usb4_host_clocks_enable(struct qcom_usb4_host *host)
++{
++	int i, ret;
++
++	for (i = 0; i < host->num_clks; i++) {
++		ret = clk_prepare_enable(host->clks[i].clk);
++		if (ret)
++			dev_warn(host->dev, "clock %s enable failed: %d\n",
++				 host->clks[i].id ?: "?", ret);
++		else
++			host->clk_enabled[i] = true;
++	}
++}
++
++static int qcom_usb4_host_start(struct qcom_usb4_host *host)
++{
++	struct qcom_usb4_start_config cfg = {
++		.profile = QCOM_USB4_START_SURFACE_A8_PORT0,
++		.pcie_policy = QCOM_USB4_START_PCIE_ENABLE,
++		.mcu = &host->mcu,
++		.firmware = host->fw->data,
++		.firmware_size = host->fw->size,
++		.serial = host->serial,
++		.preset = QCOM_USB4_SURFACE_PRESET,
++		.command_timeout_us = QCOM_USB4_COMMAND_TIMEOUT_US,
++		.connection = {
++			.mode = QCOM_USB4_TUNNEL_USB4,
++			.orientation = QCOM_USB4_PAN_NORMAL,
++			.cable_type = QCOM_USB4_PAN_PASSIVE,
++			.cable_speed = 0,
++			.rounded = 0,
++			.board_retimer = QCOM_USB4_SURFACE_BOARD_RETIMER,
++		},
++	};
++	int ret;
++
++	memset(&host->start_state, 0, sizeof(host->start_state));
++	ret = qcom_usb4_startup_run(&host->start_state, &cfg, &qcom_usb4_host_start_ops, host);
++	if (ret) {
++		dev_err(host->dev,
++			"router startup failed at step %d (last completed %d): %d\n",
++			host->start_state.active_step, host->start_state.last_completed_step,
++			ret);
++		return ret;
++	}
++	dev_info(host->dev, "router firmware running, shared memory at %#x\n",
++		 host->start_state.shared_offset);
++	return 0;
++}
++
++static int qcom_usb4_host_probe_nhi(struct qcom_usb4_host *host)
++{
++	struct tb_nhi *nhi = &host->qnhi.nhi;
++	enum qcom_usb4_irq_width width;
++	unsigned int paths;
++	u32 caps;
++	int ret;
++
++	nhi->dev = host->dev;
++	nhi->iobase = host->router + QCOM_USB4_NHI_OFFSET;
++	nhi->ops = &qcom_usb4_host_nhi_ops;
++
++	caps = readl(nhi->iobase + REG_CAPS);
++	paths = caps & 0x3ff;
++	width = paths <= 10 ? QCOM_USB4_IRQ_32 : QCOM_USB4_IRQ_NATIVE_64;
++	dev_info(host->dev, "NHI capabilities %#010x: %u paths, version %lu\n",
++		 caps, paths, FIELD_GET(REG_CAPS_VERSION_MASK, caps));
++
++	ret = qcom_usb4_nhi_prepare(&host->qnhi, QCOM_USB4_ROUTER_SIZE - QCOM_USB4_NHI_OFFSET,
++				    paths, width, host->nhi_irq);
++	if (ret)
++		return dev_err_probe(host->dev, ret, "NHI adapter preparation\n");
++
++	/* nhi_probe() drops one runtime reference; balance it here. */
++	pm_runtime_get_noresume(host->dev);
++	ret = nhi_probe(nhi);
++	if (ret) {
++		pm_runtime_put_noidle(host->dev);
++		return ret;
++	}
++	/* No validated router suspend/resume sequence: keep the device active. */
++	pm_runtime_forbid(host->dev);
++	host->nhi_probed = true;
++	return 0;
++}
++
++static ssize_t startup_state_show(struct device *dev, struct device_attribute *attr,
++				  char *buf)
++{
++	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
++
++	if (!host)
++		return -ENODEV;
++	return sysfs_emit(buf, "phase %d active_step %d last_completed %d error %d shared %#x started %d nhi %d connected %d\n",
++			  host->start_state.phase, host->start_state.active_step,
++			  host->start_state.last_completed_step, host->start_state.error,
++			  host->start_state.shared_offset, host->started, host->nhi_probed,
++			  host->connected);
++}
++static DEVICE_ATTR_RO(startup_state);
++
++/* Bring-up only: send one raw mailbox word (hex) to running router firmware. */
++static ssize_t mailbox_store(struct device *dev, struct device_attribute *attr,
++			     const char *buf, size_t count)
++{
++	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
++	u32 command;
++	int ret;
++
++	if (!host)
++		return -ENODEV;
++	ret = kstrtou32(buf, 16, &command);
++	if (ret)
++		return ret;
++	mutex_lock(&host->lock);
++	if (!host->started)
++		ret = -EHOSTDOWN;
++	else
++		ret = qcom_usb4_host_send_command(host, command, "manual");
++	mutex_unlock(&host->lock);
++	return ret ?: count;
++}
++static DEVICE_ATTR_WO(mailbox);
++
++/*
++ * Bring-up only: the Windows display driver programs a per-DP-IN register
++ * block inside the router window (0x83000 for the first DP IN adapter,
++ * +0x3000 for the second) plus a few shared words. Dump the words it uses
++ * so the DisplayPort tunneling work can compare live state with Windows.
++ */
++#define QCOM_USB4_DPIN_BLOCK(n)		(0x83000 + (n) * 0x3000)
++#define QCOM_USB4_DPIN_CTRL		0x150
++#define QCOM_USB4_DPIN_STATUS		0x154
++#define QCOM_USB4_DPIN_CONFIG		0x158
++#define QCOM_USB4_DPIN_CMD_RESP		0x22c
++#define QCOM_USB4_DPIN_CMD		0x230
++#define QCOM_USB4_DPIN_CMD_TIMEOUT_MS	1000
++
++static ssize_t dpin_regs_show(struct device *dev, struct device_attribute *attr,
++			      char *buf)
++{
++	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
++	static const u32 shared[] = { 0x7f400, 0x7f404, 0x7f408, 0x7f40c,
++				      0x84040, 0x84044, 0x84048, 0x8404c,
++				      0x84070, 0x84074, 0x84078, 0x8407c,
++				      0x85000, 0x85004, 0x85008, 0x8500c,
++				      0x87040, 0x87044, 0x87070, 0x87074,
++				      0x87078, 0x88000, 0x88004, 0x88008,
++				      0x8800c };
++	ssize_t len = 0;
++	unsigned int n, i;
++
++	if (!host)
++		return -ENODEV;
++	mutex_lock(&host->lock);
++	if (!host->started) {
++		mutex_unlock(&host->lock);
++		return -EHOSTDOWN;
++	}
++	for (n = 0; n < 2; n++) {
++		u32 base = QCOM_USB4_DPIN_BLOCK(n);
++
++		len += sysfs_emit_at(buf, len, "dpin%u @%#x:", n, base);
++		for (i = 0; i < 0x40; i += 4)
++			len += sysfs_emit_at(buf, len, " %08x",
++					     readl(host->router + base + i));
++		len += sysfs_emit_at(buf, len, "\n");
++		len += sysfs_emit_at(buf, len, "dpin%u +0x140:", n);
++		for (i = 0x140; i < 0x160; i += 4)
++			len += sysfs_emit_at(buf, len, " %08x",
++					     readl(host->router + base + i));
++		len += sysfs_emit_at(buf, len, "\n");
++		len += sysfs_emit_at(buf, len, "dpin%u +0x220:", n);
++		for (i = 0x220; i < 0x240; i += 4)
++			len += sysfs_emit_at(buf, len, " %08x",
++					     readl(host->router + base + i));
++		len += sysfs_emit_at(buf, len, "\n");
++	}
++	len += sysfs_emit_at(buf, len, "shared:");
++	for (i = 0; i < ARRAY_SIZE(shared); i++)
++		len += sysfs_emit_at(buf, len, " %#x=%08x", shared[i],
++				     readl(host->router + shared[i]));
++	len += sysfs_emit_at(buf, len, "\n");
++	mutex_unlock(&host->lock);
++	return len;
++}
++static DEVICE_ATTR_RO(dpin_regs);
++
++/*
++ * Bring-up only: "<adapter> <hex command>" writes one DPSW command word the
++ * way the Windows display driver does (command register, poll for clear,
++ * read the response word). The result is logged, not acted upon.
++ */
++static ssize_t dpsw_store(struct device *dev, struct device_attribute *attr,
++			  const char *buf, size_t count)
++{
++	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
++	unsigned int adapter, waited = 0;
++	u32 command, pending, response;
++	void __iomem *block;
++
++	if (!host)
++		return -ENODEV;
++	if (qcom_usb4_dp_active(host->dp))
++		return -EBUSY;
++	if (sscanf(buf, "%u %x", &adapter, &command) != 2 || adapter > 1)
++		return -EINVAL;
++	mutex_lock(&host->lock);
++	if (!host->started) {
++		mutex_unlock(&host->lock);
++		return -EHOSTDOWN;
++	}
++	block = host->router + QCOM_USB4_DPIN_BLOCK(adapter);
++	pending = readl(block + QCOM_USB4_DPIN_CMD);
++	if (pending) {
++		dev_warn(dev, "DPSW adapter %u busy: command %#x pending\n",
++			 adapter, pending);
++		mutex_unlock(&host->lock);
++		return -EBUSY;
++	}
++	writel(command, block + QCOM_USB4_DPIN_CMD);
++	do {
++		msleep(10);
++		waited += 10;
++		pending = readl(block + QCOM_USB4_DPIN_CMD);
++	} while (pending && waited < QCOM_USB4_DPIN_CMD_TIMEOUT_MS);
++	response = readl(block + QCOM_USB4_DPIN_CMD_RESP);
++	dev_info(dev, "DPSW adapter %u command %#x: %s after %u ms, response %#x, ctrl %08x status %08x config %08x\n",
++		 adapter, command, pending ? "still pending" : "consumed", waited,
++		 response, readl(block + QCOM_USB4_DPIN_CTRL),
++		 readl(block + QCOM_USB4_DPIN_STATUS),
++		 readl(block + QCOM_USB4_DPIN_CONFIG));
++	mutex_unlock(&host->lock);
++	return pending ? -ETIMEDOUT : count;
++}
++static DEVICE_ATTR_WO(dpsw);
++
++/*
++ * Bring-up only: "<hex offset> <hex value>" writes one word into the DP IN
++ * glue area of the router window (0x7f000..0x89fff), for replaying the
++ * Windows display driver's register sequence by hand.
++ */
++static ssize_t poke_store(struct device *dev, struct device_attribute *attr,
++			  const char *buf, size_t count)
++{
++	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
++	u32 offset, value, before;
++
++	if (!host)
++		return -ENODEV;
++	if (qcom_usb4_dp_active(host->dp))
++		return -EBUSY;
++	if (sscanf(buf, "%x %x", &offset, &value) != 2 || offset & 3 ||
++	    offset < 0x7f000 || offset >= 0x8a000)
++		return -EINVAL;
++	mutex_lock(&host->lock);
++	if (!host->started) {
++		mutex_unlock(&host->lock);
++		return -EHOSTDOWN;
++	}
++	before = readl(host->router + offset);
++	writel(value, host->router + offset);
++	dev_info(dev, "poke %#x: %08x -> wrote %08x, reads %08x\n", offset, before,
++		 value, readl(host->router + offset));
++	mutex_unlock(&host->lock);
++	return count;
++}
++static DEVICE_ATTR_WO(poke);
++
++/*
++ * Bring-up only: run the USB4 DP resource router operations on demand.
++ * "query <port>" addresses a host router DP IN adapter; "retry" re-runs
++ * the connection manager's DP IN discovery and DP tunneling.
++ *
++ * Raw allocation/deallocation cannot be exposed here: they bypass the
++ * connection manager's resource list and live tunnels. In particular,
++ * deallocation can release the producer while its tunnel still owns it.
++ * This is invalid even with the experimental display provider disabled.
++ */
++static ssize_t dp_resource_store(struct device *dev, struct device_attribute *attr,
++				 const char *buf, size_t count)
++{
++	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
++	struct tb_switch *sw;
++	struct tb_port *port;
++	unsigned int number;
++	struct tb *tb;
++	char op[8], extra;
++
++	if (!host)
++		return -ENODEV;
++	if (sscanf(buf, "%7s", op) != 1)
++		return -EINVAL;
++	if (!strcmp(op, "alloc") || !strcmp(op, "dealloc"))
++		return -EOPNOTSUPP;
++	if (!host->nhi_probed)
++		return -EHOSTDOWN;
++	tb = dev_get_drvdata(host->dev);
++	if (!tb)
++		return -ENODEV;
++	if (sysfs_streq(buf, "retry")) {
++		tb_qcom_retry_dp_resources(tb);
++		return count;
++	}
++	if (sscanf(buf, "%7s %u %c", op, &number, &extra) != 2 ||
++	    strcmp(op, "query"))
++		return -EINVAL;
++	mutex_lock(&tb->lock);
++	sw = tb->root_switch;
++	if (!sw || number > sw->config.max_port_number) {
++		mutex_unlock(&tb->lock);
++		return -ENODEV;
++	}
++	port = &sw->ports[number];
++	if (!tb_port_is_dpin(port)) {
++		mutex_unlock(&tb->lock);
++		return -EINVAL;
++	}
++	dev_info(dev, "port %u query: %s\n", number,
++		 tb_switch_query_dp_resource(sw, port) ? "available" : "not available");
++	mutex_unlock(&tb->lock);
++	return count;
++}
++static DEVICE_ATTR_WO(dp_resource);
++
++static ssize_t usb4_dp_show(struct device *dev, struct device_attribute *attr,
++			   char *buf)
++{
++	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
++
++	if (!host || !host->dp)
++		return -ENODEV;
++	return qcom_usb4_dp_status(host->dp, buf);
++}
++
++static ssize_t usb4_dp_store(struct device *dev, struct device_attribute *attr,
++			    const char *buf, size_t count)
++{
++	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
++	int ret;
++
++	if (!host || !host->dp || !host->started || !host->nhi_probed)
++		return -ENODEV;
++	if (sysfs_streq(buf, "on"))
++		ret = qcom_usb4_dp_enable(host->dp);
++	else if (sysfs_streq(buf, "off"))
++		ret = qcom_usb4_dp_disable(host->dp, false);
++	else if (sysfs_streq(buf, "discover"))
++		ret = qcom_usb4_dp_discover(host->dp);
++	else
++		return -EINVAL;
++	return ret ? ret : count;
++}
++static DEVICE_ATTR_RW(usb4_dp);
++
++static struct attribute *qcom_usb4_host_attrs[] = {
++	&dev_attr_startup_state.attr,
++	&dev_attr_mailbox.attr,
++	&dev_attr_dpin_regs.attr,
++	&dev_attr_dpsw.attr,
++	&dev_attr_poke.attr,
++	&dev_attr_dp_resource.attr,
++	&dev_attr_usb4_dp.attr,
++	NULL,
++};
++ATTRIBUTE_GROUPS(qcom_usb4_host);
++
++static int qcom_usb4_host_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct qcom_usb4_host *host;
++	const char *fw_name;
++	unsigned int i;
++	int ret;
++
++	host = devm_kzalloc(dev, sizeof(*host), GFP_KERNEL);
++	if (!host)
++		return -ENOMEM;
++	host->dev = dev;
++	mutex_init(&host->lock);
++	init_completion(&host->stop_event);
++	host->orientation = TYPEC_ORIENTATION_NONE;
++
++	ret = of_property_read_u32(dev->of_node, "qcom,router-index", &host->port);
++	if (ret && ret != -EINVAL)
++		return ret;
++	if (host->port != 0)
++		return dev_err_probe(dev, -EINVAL,
++				     "only router 0 has a verified startup profile\n");
++
++	ret = of_property_read_string(dev->of_node, "firmware-name", &fw_name);
++	if (ret)
++		return dev_err_probe(dev, ret, "firmware-name\n");
++
++	ret = qcom_usb4_host_get_resources(host);
++	if (ret)
++		return ret;
++	host->dp = qcom_usb4_dp_create(dev, host->router);
++	if (IS_ERR(host->dp))
++		return PTR_ERR(host->dp);
++
++	mutex_lock(&qcom_usb4_hosts_lock);
++	for (i = 0; i < QCOM_USB4_MAX_ROUTERS; i++) {
++		if (!qcom_usb4_hosts[i]) {
++			qcom_usb4_hosts[i] = host;
++			break;
++		}
++	}
++	mutex_unlock(&qcom_usb4_hosts_lock);
++	if (i == QCOM_USB4_MAX_ROUTERS)
++		return -EBUSY;
++
++	/* Register early so the alternate-mode driver can bind regardless. */
++	ret = qcom_usb4_host_typec_register(host);
++	if (ret)
++		goto err_unlist;
++
++	if (!qcom_startup) {
++		dev_warn(dev, "router startup disabled by module parameter\n");
++		return 0;
++	}
++
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		goto err_unlist;
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0) {
++		dev_err(dev, "power on failed: %d\n", ret);
++		goto err_unlist;
++	}
++	host->runtime_held = true;
++
++	ret = icc_set_bw(host->icc_ddr, 0, QCOM_USB4_DDR_PEAK_BW);
++	if (ret)
++		dev_warn(dev, "usb4-ddr bandwidth vote failed: %d\n", ret);
++	ret = icc_set_bw(host->icc_apps, 0, QCOM_USB4_APPS_PEAK_BW);
++	if (ret)
++		dev_warn(dev, "apps-usb4 bandwidth vote failed: %d\n", ret);
++
++	qcom_usb4_host_clocks_enable(host);
++
++	ret = request_firmware(&host->fw, fw_name, dev);
++	if (ret) {
++		dev_err(dev, "router firmware %s unavailable: %d\n", fw_name, ret);
++		goto out_stopped;
++	}
++	dev_info(dev, "router firmware %s: %zu bytes, SoC serial %#x\n", fw_name,
++		 host->fw->size, host->serial);
++
++	ret = devm_request_threaded_irq(dev, host->mcu_irq, NULL, qcom_usb4_host_mcu_irq,
++					IRQF_ONESHOT, "qcom-usb4-mcu", host);
++	if (ret) {
++		dev_err(dev, "MCU interrupt request failed: %d\n", ret);
++		goto out_stopped;
++	}
++
++	ret = qcom_usb4_host_start(host);
++	if (ret)
++		goto out_stopped;
++
++	/* Enable MCU event delivery now that the shared memory is known. */
++	host->event_consumer = 0;
++	host->mcu_irq_enabled = true;
++	qcom_usb4_host_update_router(host, QCOM_USB4_MCU_IRQ_ENABLE, BIT(0), BIT(0));
++
++	ret = qcom_usb4_host_probe_nhi(host);
++	if (ret) {
++		dev_err(dev, "NHI probe failed: %d\n", ret);
++		/* nhi_probe() already ran our shutdown on its failure path. */
++		goto out_stopped;
++	}
++
++	mutex_lock(&host->lock);
++	host->started = true;
++	qcom_usb4_host_apply_link(host);
++	mutex_unlock(&host->lock);
++
++	dev_info(dev, "USB4 host router %u up\n", host->port);
++	return 0;
++
++out_stopped:
++	/* Keep the device bound and inspectable; the router stays down. */
++	qcom_usb4_host_stop_hardware(host);
++	dev_err(dev, "USB4 host router %u not started (%d)\n", host->port, ret);
++	return 0;
++
++err_unlist:
++	mutex_lock(&qcom_usb4_hosts_lock);
++	qcom_usb4_hosts[i] = NULL;
++	mutex_unlock(&qcom_usb4_hosts_lock);
++	return ret;
++}
++
++static void qcom_usb4_host_teardown(struct qcom_usb4_host *host)
++{
++	unsigned int i;
++
++	if (host->nhi_probed) {
++		/* Domain removal ends in our NHI shutdown, which stops the hardware. */
++		nhi_remove(&host->qnhi.nhi);
++		host->nhi_probed = false;
++		pm_runtime_put_noidle(host->dev);
++	} else {
++		qcom_usb4_host_stop_hardware(host);
++	}
++	qcom_usb4_host_clocks_disable(host);
++	if (host->runtime_held) {
++		pm_runtime_put_sync(host->dev);
++		host->runtime_held = false;
++	}
++	if (host->fw) {
++		release_firmware(host->fw);
++		host->fw = NULL;
++	}
++	mutex_lock(&qcom_usb4_hosts_lock);
++	for (i = 0; i < QCOM_USB4_MAX_ROUTERS; i++)
++		if (qcom_usb4_hosts[i] == host)
++			qcom_usb4_hosts[i] = NULL;
++	mutex_unlock(&qcom_usb4_hosts_lock);
++}
++
++static void qcom_usb4_host_remove(struct platform_device *pdev)
++{
++	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(&pdev->dev);
++
++	if (host)
++		qcom_usb4_host_teardown(host);
++}
++
++static void qcom_usb4_host_shutdown(struct platform_device *pdev)
++{
++	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(&pdev->dev);
++
++	if (host)
++		qcom_usb4_host_teardown(host);
++}
++
++static const struct of_device_id qcom_usb4_host_of_match[] = {
++	{ .compatible = "qcom,glymur-usb4" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, qcom_usb4_host_of_match);
++/* Surface Laptop 8 router 0 image; initramfs tooling picks it up from here. */
++MODULE_FIRMWARE("qcom/glymur/surface-laptop8/usb4-router-legacy.bin");
++
++struct platform_driver qcom_usb4_host_driver = {
++	.probe = qcom_usb4_host_probe,
++	.remove = qcom_usb4_host_remove,
++	.shutdown = qcom_usb4_host_shutdown,
++	.driver = {
++		.name = "qcom-usb4-host",
++		.of_match_table = qcom_usb4_host_of_match,
++		.dev_groups = qcom_usb4_host_groups,
++		/* Type-C requests may arrive before startup; do not probe asynchronously. */
++	},
++};
+diff --git a/drivers/thunderbolt/qcom-usb4-irq.c b/drivers/thunderbolt/qcom-usb4-irq.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..5bc992989114757cb0f2755169cf9dde579d6301
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-irq.c
+@@ -0,0 +1,131 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Original transport for the recovered Qualcomm NHI line-interrupt layout. */
++
++#include <linux/bits.h>
++#include <linux/errno.h>
++
++#include "qcom-usb4-irq.h"
++
++#define QCOM_USB4_IRQ_PENDING		0x37800
++#define QCOM_USB4_IRQ_ACK			0x37808
++#define QCOM_USB4_IRQ_MASK		0x38208
++#define QCOM_USB4_IRQ_ENABLE		0x38210
++#define QCOM_USB4_IRQ_DMA_MISC		0x39864
++#define QCOM_USB4_IRQ_DISABLE_CLEAR_ON_READ	BIT(17)
++
++static bool qcom_usb4_irq_valid(const struct qcom_usb4_irq *irq)
++{
++	if (!irq || !irq->base || !irq->paths || irq->paths > 21)
++		return false;
++	if ((unsigned long)irq->base &
++	    (irq->width == QCOM_USB4_IRQ_NATIVE_64 ? 7 : 3))
++		return false;
++	if (irq->paths <= 10)
++		return irq->width == QCOM_USB4_IRQ_32;
++	return irq->width == QCOM_USB4_IRQ_NATIVE_64 ||
++	       irq->width == QCOM_USB4_IRQ_SPLIT_64;
++}
++
++int qcom_usb4_irq_init(struct qcom_usb4_irq *irq, void __iomem *base,
++		      size_t mapping_size, unsigned int paths,
++		      enum qcom_usb4_irq_width width)
++{
++	struct qcom_usb4_irq layout = {
++		.base = base,
++		.paths = paths,
++		.width = width,
++	};
++
++	if (!irq)
++		return -EINVAL;
++	*irq = (struct qcom_usb4_irq) { 0 };
++	if (mapping_size < QCOM_USB4_IRQ_DMA_MISC + sizeof(u32) ||
++	    !qcom_usb4_irq_valid(&layout))
++		return -EINVAL;
++	*irq = layout;
++	return 0;
++}
++
++static u64 qcom_usb4_irq_read(const struct qcom_usb4_irq *irq)
++{
++	u32 low, high;
++
++	if (irq->width == QCOM_USB4_IRQ_NATIVE_64)
++		return readq(irq->base + QCOM_USB4_IRQ_PENDING);
++	low = readl(irq->base + QCOM_USB4_IRQ_PENDING);
++	if (irq->width == QCOM_USB4_IRQ_32)
++		return low;
++	high = readl(irq->base + QCOM_USB4_IRQ_PENDING + sizeof(u32));
++	return low | (u64)high << 32;
++}
++
++static void qcom_usb4_irq_write(const struct qcom_usb4_irq *irq, u32 offset,
++			       u64 value)
++{
++	if (irq->width == QCOM_USB4_IRQ_NATIVE_64) {
++		writeq(value, irq->base + offset);
++		return;
++	}
++	writel((u32)value, irq->base + offset);
++	if (irq->width == QCOM_USB4_IRQ_SPLIT_64)
++		writel((u32)(value >> 32), irq->base + offset + sizeof(u32));
++}
++
++int qcom_usb4_irq_configure(struct qcom_usb4_irq *irq)
++{
++	u32 value;
++
++	if (!qcom_usb4_irq_valid(irq))
++		return -EINVAL;
++	value = readl(irq->base + QCOM_USB4_IRQ_DMA_MISC);
++	writel(value | QCOM_USB4_IRQ_DISABLE_CLEAR_ON_READ,
++	       irq->base + QCOM_USB4_IRQ_DMA_MISC);
++	return 0;
++}
++
++int qcom_usb4_irq_capture(struct qcom_usb4_irq *irq, u64 *pending)
++{
++	u64 value;
++
++	if (!pending || !qcom_usb4_irq_valid(irq))
++		return -EINVAL;
++	value = qcom_usb4_irq_read(irq);
++	if (value) {
++		qcom_usb4_irq_write(irq, QCOM_USB4_IRQ_MASK, value);
++		qcom_usb4_irq_write(irq, QCOM_USB4_IRQ_ACK, value);
++	}
++	*pending = value;
++	return value ? 1 : 0;
++}
++
++int qcom_usb4_irq_set_mask(struct qcom_usb4_irq *irq, unsigned int cause,
++			  bool mask)
++{
++	if (!qcom_usb4_irq_valid(irq) || cause >= 3 * irq->paths)
++		return -EINVAL;
++	qcom_usb4_irq_write(irq, mask ? QCOM_USB4_IRQ_MASK : QCOM_USB4_IRQ_ENABLE,
++			    BIT_ULL(cause));
++	return 0;
++}
++
++int qcom_usb4_irq_disable(struct qcom_usb4_irq *irq)
++{
++	if (!qcom_usb4_irq_valid(irq))
++		return -EINVAL;
++	/* The line pool implements 63 slots; 32-bit access truncates this mask. */
++	qcom_usb4_irq_write(irq, QCOM_USB4_IRQ_MASK, BIT_ULL(63) - 1);
++	qcom_usb4_irq_write(irq, QCOM_USB4_IRQ_ACK, ~0ULL);
++	/* Flush the mask/ack writes before the owner proceeds with teardown. */
++	readl(irq->base + QCOM_USB4_IRQ_DMA_MISC);
++	return 0;
++}
++
++int qcom_usb4_irq_clear_cause(struct qcom_usb4_irq *irq, unsigned int cause)
++{
++	if (!qcom_usb4_irq_valid(irq) || cause >= 3 * irq->paths)
++		return -EINVAL;
++	qcom_usb4_irq_write(irq, QCOM_USB4_IRQ_MASK, BIT_ULL(cause));
++	qcom_usb4_irq_write(irq, QCOM_USB4_IRQ_ACK, BIT_ULL(cause));
++	readl(irq->base + QCOM_USB4_IRQ_DMA_MISC);
++	return 0;
++}
+diff --git a/drivers/thunderbolt/qcom-usb4-irq.h b/drivers/thunderbolt/qcom-usb4-irq.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..cde63ac02ee2f14469c17e992900ac64a201c834
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-irq.h
+@@ -0,0 +1,76 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef QCOM_USB4_IRQ_H
++#define QCOM_USB4_IRQ_H
++
++#include <linux/io.h>
++#include <linux/types.h>
++
++enum qcom_usb4_irq_width {
++	QCOM_USB4_IRQ_32,
++	QCOM_USB4_IRQ_NATIVE_64,
++	QCOM_USB4_IRQ_SPLIT_64,
++};
++
++/* Initialized layout, immutable while in use. This object does not own MMIO. */
++struct qcom_usb4_irq {
++	void __iomem *base;
++	unsigned int paths;
++	enum qcom_usb4_irq_width width;
++};
++
++/*
++ * The caller supplies verified capabilities and the NHI-relative mapping.
++ * Only the normal acknowledgment layout at 0x37808 is supported. Width is
++ * 32 bits for up to ten paths, otherwise native or split 64-bit access.
++ * The base must be aligned to eight bytes for native 64-bit access, otherwise
++ * four bytes. Initialization checks bounds without touching hardware.
++ */
++int qcom_usb4_irq_init(struct qcom_usb4_irq *irq, void __iomem *base,
++		      size_t mapping_size, unsigned int paths,
++		      enum qcom_usb4_irq_width width);
++
++/*
++ * All following operations require exclusive/serialized ownership of the
++ * registers and a powered, accessible mapping. They do not manage IRQs,
++ * clocks, work, vectors or ring lifetime. Configure clear-on-read off before
++ * capturing causes, including after any reset that loses this configuration.
++ */
++int qcom_usb4_irq_configure(struct qcom_usb4_irq *irq);
++
++/*
++ * Capture, mask and acknowledge the entire pending bank, in that order.
++ * Returns 1 for a captured snapshot, 0 for an empty bank, or a negative error
++ * before MMIO for invalid arguments. On error *pending is unchanged.
++ * The caller must consume the snapshot while maintaining ring/lifetime locks;
++ * this helper does not queue or accumulate it. Filter unsupported causes only
++ * after capture: even reserved pending bits must be masked and acknowledged.
++ * A repeated same-bit event before W1C may coalesce; the snapshot is not an
++ * event counter and does not establish descriptor DMA completion.
++ */
++int qcom_usb4_irq_capture(struct qcom_usb4_irq *irq, u64 *pending);
++
++/* Mask or reenable one valid cause through the write-one mask/set registers. */
++int qcom_usb4_irq_set_mask(struct qcom_usb4_irq *irq, unsigned int cause,
++			  bool mask);
++
++/*
++ * Init/shutdown only: mask the line pool's 63 slots (all 32 bits for a 32-bit
++ * bank), including quiet causes, then discard all pending status. The reserved
++ * bit 63 is excluded from this fixed mask but included in the full-bank ACK,
++ * matching the recovered teardown sequence. A DMA-misc readback follows.
++ * The owner must quiesce ring producers and serialize this operation against
++ * handlers/poll completion, preventing subsequent rearm. This does not release
++ * or synchronize the physical IRQ, drain work, or stop MCU/DMA/power. In
++ * particular, the separate MCU completion IRQ remains outside this helper.
++ */
++int qcom_usb4_irq_disable(struct qcom_usb4_irq *irq);
++
++/*
++ * Discard one stopped cause before reuse: mask, ACK that bit, then read back.
++ * Other causes are untouched; the selected cause stays masked. The caller
++ * must own the cause under the NHI lock and prevent new descriptor submissions.
++ * Do not use during polling completion: a new completion could be discarded.
++ */
++int qcom_usb4_irq_clear_cause(struct qcom_usb4_irq *irq, unsigned int cause);
++
++#endif
+diff --git a/drivers/thunderbolt/qcom-usb4-mcu.c b/drivers/thunderbolt/qcom-usb4-mcu.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf72671a5975e56378ea8d24915d029b31e1b4b8
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-mcu.c
+@@ -0,0 +1,228 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Qualcomm USB4 MCU run/ready handshake, recovered from the 8480 driver. */
++
++#include <linux/bits.h>
++#include <linux/errno.h>
++#include <linux/iopoll.h>
++#include <linux/unaligned.h>
++
++#include "qcom-usb4-drom.h"
++#include "qcom-usb4-fw.h"
++#include "qcom-usb4-mcu.h"
++
++#define QCOM_USB4_MCU_STATUS		0x18
++#define QCOM_USB4_MCU_HOST_CONTROL	0x8018
++#define QCOM_USB4_MCU_UID_HIGH		0x801c
++#define QCOM_USB4_MCU_UID_LOW		0x8020
++#define QCOM_USB4_MCU_READY		BIT(24)
++#define QCOM_USB4_MCU_RUN			BIT(0)
++#define QCOM_USB4_MCU_SHARED_MIN_SIZE	12
++#define QCOM_USB4_MCU_COMMAND_RELATIVE	0xc
++#define QCOM_USB4_MCU_MAX_COMMAND_TIMEOUT_US	1000000
++
++int qcom_usb4_mcu_init(struct qcom_usb4_mcu *mcu, void __iomem *base,
++		       size_t mapping_size, size_t ram_size,
++		       enum qcom_usb4_mcu_layout layout)
++{
++	u32 ram, control, shared;
++
++	if (!mcu)
++		return -EINVAL;
++	*mcu = (struct qcom_usb4_mcu) { 0 };
++	if (!base || (unsigned long)base % sizeof(u32) ||
++	    ram_size < QCOM_USB4_MCU_SHARED_MIN_SIZE)
++		return -EINVAL;
++
++	switch (layout) {
++	case QCOM_USB4_MCU_LEGACY:
++		ram = 0x13000;
++		control = 0x22000;
++		shared = 0x22010;
++		break;
++	case QCOM_USB4_MCU_V2:
++		ram = 0x1e000;
++		control = 0x14000;
++		shared = 0x14010;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	/* The shared register is the highest control register accessed here. */
++	if (mapping_size < shared + sizeof(u32) || ram > mapping_size ||
++	    ram_size > mapping_size - ram ||
++	    (ram <= control && ram_size > control - ram))
++		return -EINVAL;
++
++	mcu->base = base;
++	mcu->ram_size = ram_size;
++	mcu->ram_offset = ram;
++	mcu->control_offset = control;
++	mcu->shared_offset_reg = shared;
++	mcu->drom_offset = layout == QCOM_USB4_MCU_V2 ? 0xff20 : 0xdf20;
++	return 0;
++}
++
++static int qcom_usb4_mcu_write_word(void *context, u32 offset, u32 value)
++{
++	struct qcom_usb4_mcu *mcu = context;
++
++	writel(value, mcu->base + mcu->ram_offset + offset);
++	return 0;
++}
++
++static int qcom_usb4_mcu_prepare_drom(struct qcom_usb4_mcu *mcu, u8 *drom,
++				      u32 serial, u8 router)
++{
++	if (!mcu || !mcu->base)
++		return -EINVAL;
++	if (mcu->drom_offset > mcu->ram_size ||
++	    QCOM_USB4_DROM_SIZE > mcu->ram_size - mcu->drom_offset)
++		return -EFBIG;
++	return qcom_usb4_drom_build(drom, QCOM_USB4_DROM_SIZE, serial, router);
++}
++
++int qcom_usb4_mcu_upload(struct qcom_usb4_mcu *mcu, const u8 *data, size_t size)
++{
++	int ret;
++
++	if (!mcu || !mcu->base)
++		return -EINVAL;
++	ret = qcom_usb4_fw_validate(data, size, mcu->ram_size);
++	if (ret)
++		return ret;
++	if (readl(mcu->base + mcu->control_offset) & QCOM_USB4_MCU_RUN)
++		return -EBUSY;
++
++	/* The observed upload sequence writes zero before copying any records. */
++	writel(0, mcu->base + mcu->control_offset);
++	ret = qcom_usb4_fw_upload(data, size, mcu->ram_size,
++				 qcom_usb4_mcu_write_word, mcu);
++	if (!ret)
++		/* Flush writes before an intervening provider operation. */
++		readl(mcu->base + mcu->control_offset);
++	return ret;
++}
++
++static void qcom_usb4_mcu_store_drom(struct qcom_usb4_mcu *mcu, const u8 *drom)
++{
++	unsigned int i;
++
++	writel(get_unaligned_le32(drom + 5), mcu->base + QCOM_USB4_MCU_UID_HIGH);
++	writel(get_unaligned_le32(drom + 1), mcu->base + QCOM_USB4_MCU_UID_LOW);
++	for (i = 0; i < QCOM_USB4_DROM_SIZE; i += sizeof(u32))
++		qcom_usb4_mcu_write_word(mcu, mcu->drom_offset + i,
++					 get_unaligned_le32(drom + i));
++	readl(mcu->base + mcu->control_offset);
++}
++
++int qcom_usb4_mcu_write_drom(struct qcom_usb4_mcu *mcu, u32 serial, u8 router)
++{
++	u8 drom[QCOM_USB4_DROM_SIZE];
++	int ret;
++
++	ret = qcom_usb4_mcu_prepare_drom(mcu, drom, serial, router);
++	if (ret)
++		return ret;
++	if (readl(mcu->base + mcu->control_offset) & QCOM_USB4_MCU_RUN)
++		return -EBUSY;
++	qcom_usb4_mcu_store_drom(mcu, drom);
++	return 0;
++}
++
++int qcom_usb4_mcu_load(struct qcom_usb4_mcu *mcu, const u8 *data, size_t size,
++		       u32 serial, u8 router)
++{
++	u8 drom[QCOM_USB4_DROM_SIZE];
++	int ret;
++
++	/* Validate the descriptor before upload can modify any hardware. */
++	ret = qcom_usb4_mcu_prepare_drom(mcu, drom, serial, router);
++	if (ret)
++		return ret;
++	ret = qcom_usb4_mcu_upload(mcu, data, size);
++	if (ret)
++		return ret;
++	qcom_usb4_mcu_store_drom(mcu, drom);
++	return 0;
++}
++
++static void qcom_usb4_mcu_update(struct qcom_usb4_mcu *mcu, u32 offset,
++				u32 mask, u32 value)
++{
++	u32 reg = readl(mcu->base + offset);
++
++	writel((reg & ~mask) | (value & mask), mcu->base + offset);
++}
++
++void qcom_usb4_mcu_stop(struct qcom_usb4_mcu *mcu)
++{
++	if (!mcu || !mcu->base)
++		return;
++
++	qcom_usb4_mcu_update(mcu, mcu->control_offset, QCOM_USB4_MCU_RUN, 0);
++	qcom_usb4_mcu_update(mcu, QCOM_USB4_MCU_HOST_CONTROL,
++			     QCOM_USB4_MCU_READY, 0);
++	/* Complete posted writes before the caller releases power or clocks. */
++	readl(mcu->base + QCOM_USB4_MCU_HOST_CONTROL);
++}
++
++int qcom_usb4_mcu_start(struct qcom_usb4_mcu *mcu, u32 *shared_offset)
++{
++	u32 status, offset;
++	int ret;
++
++	if (!shared_offset)
++		return -EINVAL;
++	*shared_offset = 0;
++	if (!mcu || !mcu->base)
++		return -EINVAL;
++	if (readl(mcu->base + mcu->control_offset) & QCOM_USB4_MCU_RUN)
++		return -EBUSY;
++
++	qcom_usb4_mcu_update(mcu, QCOM_USB4_MCU_HOST_CONTROL,
++			     QCOM_USB4_MCU_READY, 0);
++	qcom_usb4_mcu_update(mcu, mcu->control_offset,
++			     QCOM_USB4_MCU_RUN, QCOM_USB4_MCU_RUN);
++	ret = readl_poll_timeout(mcu->base + QCOM_USB4_MCU_STATUS, status,
++				 status & QCOM_USB4_MCU_READY, 5000, 1000000);
++	if (ret)
++		goto stop;
++
++	offset = readl(mcu->base + mcu->shared_offset_reg);
++	if (offset % sizeof(u32) ||
++	    offset > mcu->ram_size - QCOM_USB4_MCU_SHARED_MIN_SIZE) {
++		ret = -EPROTO;
++		goto stop;
++	}
++
++	*shared_offset = offset;
++	return 0;
++
++stop:
++	qcom_usb4_mcu_stop(mcu);
++	return ret;
++}
++
++int qcom_usb4_mcu_command(struct qcom_usb4_mcu *mcu, u32 command,
++			 unsigned int timeout_us)
++{
++	void __iomem *mailbox;
++	u32 value;
++
++	if (!mcu || !mcu->base || !command || !timeout_us ||
++	    timeout_us > QCOM_USB4_MCU_MAX_COMMAND_TIMEOUT_US)
++		return -EINVAL;
++	if (!(readl(mcu->base + mcu->control_offset) & QCOM_USB4_MCU_RUN))
++		return -EHOSTDOWN;
++	if (!(readl(mcu->base + QCOM_USB4_MCU_STATUS) & QCOM_USB4_MCU_READY))
++		return -EAGAIN;
++
++	/* Both layouts place the mailbox before the validated shared register. */
++	mailbox = mcu->base + mcu->control_offset + QCOM_USB4_MCU_COMMAND_RELATIVE;
++	if (readl(mailbox))
++		return -EBUSY;
++
++	writel(command, mailbox);
++	return readl_poll_timeout(mailbox, value, !value, 1, timeout_us);
++}
+diff --git a/drivers/thunderbolt/qcom-usb4-mcu.h b/drivers/thunderbolt/qcom-usb4-mcu.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..df49836bfcf3d13f0762ba5d6a38299b4da599cc
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-mcu.h
+@@ -0,0 +1,79 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef QCOM_USB4_MCU_H
++#define QCOM_USB4_MCU_H
++
++#include <linux/io.h>
++#include <linux/types.h>
++
++enum qcom_usb4_mcu_layout {
++	QCOM_USB4_MCU_LEGACY,
++	QCOM_USB4_MCU_V2,
++};
++
++struct qcom_usb4_mcu {
++	void __iomem *base;
++	size_t ram_size;
++	u32 ram_offset;
++	u32 control_offset;
++	u32 shared_offset_reg;
++	u32 drom_offset;
++};
++
++/*
++ * The caller must verify the router variant and usable RAM size, own the
++ * mapping, serialize all operations, and maintain power/clocks throughout.
++ * The register mapping base must be aligned to four bytes.
++ * Initializing this helper does not touch hardware. It is not a power/reset
++ * sequence or a platform driver. Do not modify the fields after initialization.
++ */
++int qcom_usb4_mcu_init(struct qcom_usb4_mcu *mcu, void __iomem *base,
++		       size_t mapping_size, size_t ram_size,
++		       enum qcom_usb4_mcu_layout layout);
++
++/*
++ * Separate stopped-state operations for platform sequencing. Upload validates
++ * the entire image before zeroing control and writing firmware; it does not
++ * write UID/DROM or start the MCU. A control readback follows successful
++ * upload before returning. The owner can then perform the required
++ * provider memory-force and board-extension steps before writing UID/DROM.
++ * Both operations reject running firmware without writes. DROM input/bounds
++ * validation happens before any MMIO. Neither operation establishes power,
++ * image identity, physical halt or successful completion of the other step.
++ * Keep exclusive ownership across the entire sequence, including provider work.
++ */
++int qcom_usb4_mcu_upload(struct qcom_usb4_mcu *mcu, const u8 *data, size_t size);
++int qcom_usb4_mcu_write_drom(struct qcom_usb4_mcu *mcu, u32 serial, u8 router);
++
++/*
++ * Upload a caller-selected immutable image and generated DROM while stopped.
++ * serial and router must be validated hardware identity, as for the DROM
++ * builder. Malformed input or running firmware causes no hardware writes.
++ * This convenience operation provides no intervening provider step. The Surface
++ * platform sequence requires upload and write_drom separately, with memory
++ * force and the board extension between them. This does not select an image
++ * or establish the board's power/reset state.
++ */
++int qcom_usb4_mcu_load(struct qcom_usb4_mcu *mcu, const u8 *data, size_t size,
++		       u32 serial, u8 router);
++
++/*
++ * Start requires a fully uploaded firmware image and DROM. Already running
++ * firmware is rejected without modifying hardware. On failure after starting,
++ * stop the MCU and leave shared_offset zero. Success validates only the first
++ * 12 shared bytes; further accesses require their own bounds checks.
++ */
++int qcom_usb4_mcu_start(struct qcom_usb4_mcu *mcu, u32 *shared_offset);
++void qcom_usb4_mcu_stop(struct qcom_usb4_mcu *mcu);
++
++/*
++ * Send a caller-validated, nonzero command to running, ready firmware.
++ * Requires sleepable context and exclusive command/lifecycle ownership.
++ * timeout_us must be in 1..1000000; it is caller policy, not a discovered
++ * hardware limit. Success means only that firmware cleared the mailbox.
++ * On timeout the command may still be executing: do not retry blindly. This
++ * helper neither clears a pending command nor resets/stops firmware.
++ */
++int qcom_usb4_mcu_command(struct qcom_usb4_mcu *mcu, u32 command,
++			 unsigned int timeout_us);
++
++#endif
+diff --git a/drivers/thunderbolt/qcom-usb4-nhi.c b/drivers/thunderbolt/qcom-usb4-nhi.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..d73ac6a0a756b2a4612f29c8daefea95abe3536e
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-nhi.c
+@@ -0,0 +1,252 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/bitops.h>
++#include <linux/errno.h>
++#include <linux/interrupt.h>
++#include <linux/lockdep.h>
++
++#include "qcom-usb4-nhi.h"
++
++static struct qcom_usb4_nhi *to_qcom_nhi(struct tb_nhi *nhi)
++{
++	return container_of(nhi, struct qcom_usb4_nhi, nhi);
++}
++
++static struct tb_ring *qcom_usb4_nhi_owned_ring(struct qcom_usb4_nhi *qnhi,
++					     unsigned int cause)
++{
++	struct tb_nhi *nhi = &qnhi->nhi;
++	struct tb_ring *ring;
++
++	lockdep_assert_held(&nhi->lock);
++	if (cause >= 2 * nhi->hop_count)
++		return NULL;
++	if (cause < nhi->hop_count)
++		ring = nhi->tx_rings[cause];
++	else
++		ring = nhi->rx_rings[cause - nhi->hop_count];
++	if (!ring || (ring->flags & RING_FLAG_NO_INTERRUPT) ||
++	    ring->irq != qnhi->irq || ring->vector >= QCOM_USB4_NHI_MESSAGE_IDS ||
++	    qnhi->owners[ring->vector] != ring)
++		return NULL;
++	return ring;
++}
++
++int qcom_usb4_nhi_prepare(struct qcom_usb4_nhi *qnhi, size_t mapping_size,
++			 unsigned int paths, enum qcom_usb4_irq_width width,
++			 int irq)
++{
++	struct qcom_usb4_irq transport;
++	int ret;
++
++	if (!qnhi || !qnhi->nhi.dev || irq <= 0)
++		return -EINVAL;
++	if (qnhi->prepared)
++		return -EBUSY;
++	ret = qcom_usb4_irq_init(&transport, qnhi->nhi.iobase, mapping_size,
++			       paths, width);
++	if (ret)
++		return ret;
++	qnhi->transport = transport;
++	qnhi->irq = irq;
++	ida_init(&qnhi->message_ids);
++	mutex_init(&qnhi->ownership_lock);
++	qnhi->prepared = true;
++	return 0;
++}
++
++static irqreturn_t qcom_usb4_nhi_interrupt(int irq, void *data)
++{
++	struct qcom_usb4_nhi *qnhi = data;
++	struct tb_nhi *nhi = &qnhi->nhi;
++	unsigned long flags;
++	unsigned int cause;
++	u64 pending;
++	int ret = 0;
++
++	spin_lock_irqsave(&nhi->lock, flags);
++	if (!qnhi->accept_rearm || nhi->going_away)
++		goto unlock;
++	ret = qcom_usb4_irq_capture(&qnhi->transport, &pending);
++	if (ret <= 0)
++		goto unlock;
++	for (cause = 0; cause < 3 * qnhi->transport.paths; cause++) {
++		if (!(pending & BIT_ULL(cause)))
++			continue;
++		if (cause < 2 * nhi->hop_count &&
++		    !qcom_usb4_nhi_owned_ring(qnhi, cause))
++			continue;
++		if (nhi_handle_interrupt(nhi, cause))
++			qcom_usb4_irq_set_mask(&qnhi->transport, cause, false);
++	}
++unlock:
++	spin_unlock_irqrestore(&nhi->lock, flags);
++	return ret > 0 ? IRQ_HANDLED : IRQ_NONE;
++}
++
++int qcom_usb4_nhi_init_interrupts(struct tb_nhi *nhi)
++{
++	struct qcom_usb4_nhi *qnhi = to_qcom_nhi(nhi);
++	unsigned long flags;
++	int ret;
++
++	if (!qnhi->prepared || qnhi->released)
++		return -EINVAL;
++	if (qnhi->init_attempted)
++		return -EBUSY;
++	if (!nhi->tx_rings || !nhi->rx_rings ||
++	    nhi->hop_count != qnhi->transport.paths ||
++	    (nhi->quirks & QUIRK_AUTO_CLEAR_INT))
++		return -EINVAL;
++	qnhi->core_ready = true;
++	qnhi->init_attempted = true;
++	spin_lock_irqsave(&nhi->lock, flags);
++	qnhi->accept_rearm = false;
++	ret = qcom_usb4_irq_configure(&qnhi->transport);
++	if (!ret)
++		ret = qcom_usb4_irq_disable(&qnhi->transport);
++	spin_unlock_irqrestore(&nhi->lock, flags);
++	if (ret)
++		return ret;
++
++	/* Control rings require NO_SUSPEND; this is one controller-owned IRQ. */
++	ret = request_irq(qnhi->irq, qcom_usb4_nhi_interrupt, IRQF_NO_SUSPEND,
++			 dev_name(nhi->dev), qnhi);
++	if (ret)
++		return ret;
++	spin_lock_irqsave(&nhi->lock, flags);
++	qnhi->irq_requested = true;
++	qnhi->accept_rearm = true;
++	spin_unlock_irqrestore(&nhi->lock, flags);
++	return 0;
++}
++
++int qcom_usb4_nhi_request_ring_irq(struct tb_ring *ring, bool no_suspend)
++{
++	struct qcom_usb4_nhi *qnhi = to_qcom_nhi(ring->nhi);
++	unsigned long flags;
++	int id, ret = 0;
++
++	if (!qnhi->prepared)
++		return -EINVAL;
++	mutex_lock(&qnhi->ownership_lock);
++	if (!qnhi->core_ready || qnhi->released ||
++	    (ring->flags & RING_FLAG_NO_INTERRUPT)) {
++		ret = -EINVAL;
++		goto unlock;
++	}
++	/* All rings share the NO_SUSPEND physical IRQ, including these requests. */
++	(void)no_suspend;
++	id = ida_alloc_max(&qnhi->message_ids, QCOM_USB4_NHI_MESSAGE_IDS - 1,
++			   GFP_KERNEL);
++	if (id < 0) {
++		ret = id;
++		goto unlock;
++	}
++	spin_lock_irqsave(&ring->nhi->lock, flags);
++	if (!qnhi->accept_rearm || ring->nhi->going_away)
++		ret = -ESHUTDOWN;
++	else if (ring->irq)
++		ret = -EBUSY;
++	else {
++		qnhi->owners[id] = ring;
++		ring->vector = id;
++		ring->irq = qnhi->irq;
++		/* Match the captured default of 125 units, each nominally 256 ns. */
++		ring->interval_nsec = 32000;
++	}
++	spin_unlock_irqrestore(&ring->nhi->lock, flags);
++	if (ret)
++		ida_free(&qnhi->message_ids, id);
++unlock:
++	mutex_unlock(&qnhi->ownership_lock);
++	return ret;
++}
++
++void qcom_usb4_nhi_release_ring_irq(struct tb_ring *ring)
++{
++	struct qcom_usb4_nhi *qnhi = to_qcom_nhi(ring->nhi);
++	unsigned long flags;
++	int id = -1;
++
++	if (!qnhi->prepared)
++		return;
++	mutex_lock(&qnhi->ownership_lock);
++	if (!qnhi->core_ready || qnhi->released)
++		goto unlock;
++	spin_lock_irqsave(&ring->nhi->lock, flags);
++	if (ring->irq == qnhi->irq && ring->vector < QCOM_USB4_NHI_MESSAGE_IDS &&
++	    qnhi->owners[ring->vector] == ring) {
++		id = ring->vector;
++		qnhi->owners[id] = NULL;
++		ring->irq = 0;
++		ring->vector = 0;
++	}
++	spin_unlock_irqrestore(&ring->nhi->lock, flags);
++	if (id >= 0)
++		ida_free(&qnhi->message_ids, id);
++	/* No cause MMIO: the old hop can already belong to another ring. */
++unlock:
++	mutex_unlock(&qnhi->ownership_lock);
++}
++
++void qcom_usb4_nhi_ring_interrupt_mask(struct tb_nhi *nhi, unsigned int cause,
++				     bool mask)
++{
++	struct qcom_usb4_nhi *qnhi = to_qcom_nhi(nhi);
++	struct tb_ring *ring;
++
++	lockdep_assert_held(&nhi->lock);
++	if (!qnhi->accept_rearm || nhi->going_away || cause >= 2 * nhi->hop_count)
++		return;
++	ring = qcom_usb4_nhi_owned_ring(qnhi, cause);
++	if (!ring)
++		return;
++	/* Start precedes running=true. Poll rearm must preserve new pending bits. */
++	if (!mask && !ring->running &&
++	    qcom_usb4_irq_clear_cause(&qnhi->transport, cause))
++		return;
++	qcom_usb4_irq_set_mask(&qnhi->transport, cause, mask);
++}
++
++void qcom_usb4_nhi_disable_interrupts(struct tb_nhi *nhi)
++{
++	struct qcom_usb4_nhi *qnhi = to_qcom_nhi(nhi);
++	unsigned long flags;
++
++	if (!qnhi->prepared || qnhi->released)
++		return;
++	/* The common caller initializes the lock before its first disable call. */
++	if (!qnhi->core_ready)
++		qnhi->core_ready = true;
++	spin_lock_irqsave(&nhi->lock, flags);
++	qnhi->accept_rearm = false;
++	qcom_usb4_irq_disable(&qnhi->transport);
++	spin_unlock_irqrestore(&nhi->lock, flags);
++}
++
++void qcom_usb4_nhi_shutdown(struct tb_nhi *nhi)
++{
++	struct qcom_usb4_nhi *qnhi = to_qcom_nhi(nhi);
++	unsigned int id;
++
++	if (!qnhi->prepared)
++		return;
++	mutex_lock(&qnhi->ownership_lock);
++	if (qnhi->released)
++		goto unlock;
++	if (qnhi->core_ready)
++		qcom_usb4_nhi_disable_interrupts(nhi);
++	if (qnhi->irq_requested) {
++		free_irq(qnhi->irq, qnhi);
++		qnhi->irq_requested = false;
++	}
++	/* Keep ownership intact if the caller has not yet drained its rings. */
++	for (id = 0; id < QCOM_USB4_NHI_MESSAGE_IDS; id++) {
++		if (WARN_ON(qnhi->owners[id]))
++			goto unlock;
++	}
++	ida_destroy(&qnhi->message_ids);
++	qnhi->released = true;
++unlock:
++	mutex_unlock(&qnhi->ownership_lock);
++}
+diff --git a/drivers/thunderbolt/qcom-usb4-nhi.h b/drivers/thunderbolt/qcom-usb4-nhi.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..09f97ec7b082277f4612e97be3fb172592abf084
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-nhi.h
+@@ -0,0 +1,71 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef QCOM_USB4_NHI_H
++#define QCOM_USB4_NHI_H
++
++#include <linux/idr.h>
++#include <linux/mutex.h>
++
++#include "nhi.h"
++#include "qcom-usb4-irq.h"
++
++#define QCOM_USB4_NHI_MESSAGE_IDS 16
++
++/* One lifetime, initially zeroed; the frontend owns the surrounding object. */
++struct qcom_usb4_nhi {
++	struct tb_nhi nhi;
++	struct qcom_usb4_irq transport;
++	struct ida message_ids;
++	struct mutex ownership_lock;
++	struct tb_ring *owners[QCOM_USB4_NHI_MESSAGE_IDS];
++	int irq;
++	bool prepared;
++	bool core_ready;
++	bool init_attempted;
++	bool irq_requested;
++	bool accept_rearm;
++	bool released;
++};
++
++/*
++ * Set nhi.dev and nhi.iobase first. Validate the caller-supplied capabilities
++ * and initialize ownership before common probe; no MMIO or IRQ registration.
++ * Prepare, init, controller disable and shutdown must be serialized by the
++ * frontend. Repeating prepare is rejected, including after shutdown. This is
++ * not a platform driver or a complete tb_nhi_ops implementation.
++ */
++int qcom_usb4_nhi_prepare(struct qcom_usb4_nhi *qnhi, size_t mapping_size,
++			 unsigned int paths, enum qcom_usb4_irq_width width,
++			 int irq);
++
++/*
++ * Individual callbacks for a frontend's tb_nhi_ops. They require the embedded
++ * NHI above. Common probe must initialize its lock and ring arrays before
++ * init_interrupts; its earlier disable_interrupts call is supported.
++ *
++ * The single physical IRQ uses IRQF_NO_SUSPEND for the control rings. Its
++ * handler accesses MMIO only while accept_rearm is true; the owner must close
++ * that gate while registers remain accessible before removing power. This
++ * flag is not system wake enablement. The separate MCU event IRQ is not owned.
++ * Request/release callbacks run in sleepable context without the NHI lock.
++ * Their ownership mutex is always acquired before the NHI spinlock.
++ */
++int qcom_usb4_nhi_init_interrupts(struct tb_nhi *nhi);
++int qcom_usb4_nhi_request_ring_irq(struct tb_ring *ring, bool no_suspend);
++void qcom_usb4_nhi_release_ring_irq(struct tb_ring *ring);
++void qcom_usb4_nhi_ring_interrupt_mask(struct tb_nhi *nhi, unsigned int cause,
++				     bool mask);
++void qcom_usb4_nhi_disable_interrupts(struct tb_nhi *nhi);
++
++/*
++ * Idempotent final cleanup, also usable after failed probe. The owner must
++ * release every ring first. Mask/ack under the NHI lock, then free the physical
++ * IRQ outside it (waiting for handlers) before destroying the ID allocator.
++ * There is no adapter workqueue. Core ring work and domain lifetime must be
++ * drained by their owner; this callback does not stop MCU, DMA or power.
++ * An ownership mutex serializes complete allocation/release callbacks against
++ * allocator destruction. Before freeing the surrounding object, the caller
++ * must also exclude every future callback and complete all existing callers.
++ */
++void qcom_usb4_nhi_shutdown(struct tb_nhi *nhi);
++
++#endif
+diff --git a/drivers/thunderbolt/qcom-usb4-startup.c b/drivers/thunderbolt/qcom-usb4-startup.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..177e66454440f5d87ef2267e410dbff980cfb85e
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-startup.c
+@@ -0,0 +1,222 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Original, unbound forward sequence for the captured Surface A8 router 0. */
++
++#include <linux/array_size.h>
++#include <linux/bits.h>
++#include <linux/errno.h>
++
++#include "qcom-usb4-drom.h"
++#include "qcom-usb4-fw.h"
++#include "qcom-usb4-startup.h"
++
++enum start_kind {
++	START_PROVIDER,
++	START_UPDATE,
++	START_DELAY,
++	START_CLEAR_1200C,
++	START_UPLOAD,
++	START_DROM,
++	START_MCU,
++	START_PRESET,
++	START_PCIE,
++};
++
++struct start_operation {
++	enum qcom_usb4_start_step step;
++	enum start_kind kind;
++	u32 offset;
++	u32 mask;
++	u32 value;
++};
++
++#define PROVIDER(s) { .step = QCOM_USB4_START_##s, .kind = START_PROVIDER }
++#define UPDATE(s, o, m, v) { QCOM_USB4_START_##s, START_UPDATE, o, m, v }
++#define DELAY(s, us) { QCOM_USB4_START_##s, START_DELAY, 0, 0, us }
++#define SPECIAL(s, k) { .step = QCOM_USB4_START_##s, .kind = k }
++
++static const struct start_operation start_operations[] = {
++	PROVIDER(RX_PAD_PREPARE),
++	PROVIDER(TX_B_PAD_PREPARE),
++	PROVIDER(TX_A_PAD_PREPARE),
++	PROVIDER(RX_CLOCKS_REFERENCE),
++	PROVIDER(USB4_RESET_ASSERT),
++	PROVIDER(COMBO_RESET_ASSERT),
++	PROVIDER(DP_RESET_ASSERT),
++	DELAY(ASSERT_STALL, 1),
++	DELAY(ASSERT_SETTLE, 100),
++	PROVIDER(DP_RESET_DEASSERT),
++	PROVIDER(COMBO_RESET_DEASSERT),
++	PROVIDER(USB4_RESET_DEASSERT),
++	PROVIDER(CLOCK_READY),
++	DELAY(DEASSERT_SETTLE, 100),
++	PROVIDER(RX_CLOCKS_PHY),
++	SPECIAL(ROUTER_1200C_CLEAR, START_CLEAR_1200C),
++	PROVIDER(RX_PAD_ACTIVE),
++	PROVIDER(TX_B_PAD_ACTIVE),
++	PROVIDER(TX_A_PAD_ACTIVE),
++	UPDATE(ROUTER_81000_SET, 0x81000, BIT(0), BIT(0)),
++	PROVIDER(GCC_600C0_BIT3_SET),
++	DELAY(CONTROL_ASSERT_STALL, 1000),
++	DELAY(CONTROL_ASSERT_SETTLE, 100),
++	UPDATE(ROUTER_81018_SET, 0x81018, BIT(0), BIT(0)),
++	PROVIDER(GCC_600C0_BIT3_CLEAR),
++	DELAY(CONTROL_DEASSERT_STALL, 1000),
++	DELAY(CONTROL_DEASSERT_SETTLE, 100),
++	UPDATE(ROUTER_81000_CLEAR, 0x81000, BIT(0), 0),
++	SPECIAL(FIRMWARE_UPLOAD, START_UPLOAD),
++	PROVIDER(SYS_MEMORY_FORCE),
++	/* The captured Surface PHYC extension is empty, verified by owner_check. */
++	SPECIAL(DROM, START_DROM),
++	PROVIDER(TCSR_ROUTE),
++	PROVIDER(PIPE_HWCG_OFF),
++	UPDATE(ROUTER_81004_SET, 0x81004, BIT(0), BIT(0)),
++	UPDATE(TIMER_HIGH, 0x80c8, 0xffff0000, 0x00040000),
++	UPDATE(TIMER_LOW, 0x80c8, 0x0000ffff, 0),
++	UPDATE(TIMER_8148, 0x8148, 0xffffffff, 250000),
++	UPDATE(TIMER_8144, 0x8144, 0xffffffff, 4000),
++	PROVIDER(PHY_COMPOSITE),
++	UPDATE(ADAPTER_BIT23, 0xd000, BIT(23), 0),
++	UPDATE(ADAPTER_BIT22, 0xd000, BIT(22), 0),
++	UPDATE(ADAPTER_BIT21, 0xd000, BIT(21), 0),
++	SPECIAL(MCU, START_MCU),
++	SPECIAL(PRESET, START_PRESET),
++	SPECIAL(PCIE_POLICY, START_PCIE),
++};
++
++static int start_validate(const struct qcom_usb4_start_config *cfg,
++			  const struct qcom_usb4_start_ops *ops)
++{
++	const struct qcom_usb4_mcu *mcu;
++	u8 drom[QCOM_USB4_DROM_SIZE];
++	u32 command;
++	int ret;
++
++	if (!cfg || !ops || !ops->owner_check || !ops->provider ||
++	    !ops->read_router || !ops->update_router || !ops->delay_us)
++		return -EINVAL;
++	if (cfg->profile != QCOM_USB4_START_SURFACE_A8_PORT0 ||
++	    (cfg->pcie_policy != QCOM_USB4_START_PCIE_SKIP &&
++	     cfg->pcie_policy != QCOM_USB4_START_PCIE_ENABLE))
++		return -EINVAL;
++	if (cfg->preset != 0x4421 || !cfg->command_timeout_us ||
++	    cfg->command_timeout_us > 1000000 || cfg->connection.board_retimer != 1)
++		return -EINVAL;
++	mcu = cfg->mcu;
++	if (!mcu || !mcu->base || (unsigned long)mcu->base % sizeof(u32) ||
++	    mcu->ram_offset != 0x13000 || mcu->control_offset != 0x22000 ||
++	    mcu->shared_offset_reg != 0x22010 || mcu->drom_offset != 0xdf20 ||
++	    mcu->ram_size < 0xdf20 + sizeof(drom) || mcu->ram_size > 0xf000)
++		return -EINVAL;
++	ret = qcom_usb4_typec_connect_command(&cfg->connection, &command);
++	if (ret)
++		return ret;
++	ret = qcom_usb4_drom_build(drom, sizeof(drom), cfg->serial, 0);
++	if (ret)
++		return ret;
++	return qcom_usb4_fw_validate(cfg->firmware, cfg->firmware_size, mcu->ram_size);
++}
++
++static int start_clear_1200c(const struct qcom_usb4_start_ops *ops, void *ctx)
++{
++	u32 value;
++	unsigned int i;
++	int ret;
++
++	ret = ops->read_router(ctx, 0x1200c, &value);
++	if (ret)
++		return ret;
++	for (i = 0; value & BIT(31); i++) {
++		if (i == 11)
++			return -ETIMEDOUT;
++		ret = ops->update_router(ctx, 0x1200c, BIT(31), 0);
++		if (ret)
++			return ret;
++		ops->delay_us(ctx, 1);
++		/* Explicit final verification, unlike the vendor's fallthrough. */
++		ret = ops->read_router(ctx, 0x1200c, &value);
++		if (ret)
++			return ret;
++	}
++	ops->delay_us(ctx, 10000);
++	return 0;
++}
++
++static int start_execute(const struct start_operation *op,
++			 struct qcom_usb4_start_state *state,
++			 const struct qcom_usb4_start_config *cfg,
++			 const struct qcom_usb4_start_ops *ops, void *ctx)
++{
++	u32 command;
++	int ret;
++
++	switch (op->kind) {
++	case START_PROVIDER:
++		return ops->provider(ctx, op->step, cfg);
++	case START_UPDATE:
++		return ops->update_router(ctx, op->offset, op->mask, op->value);
++	case START_DELAY:
++		ops->delay_us(ctx, op->value);
++		return 0;
++	case START_CLEAR_1200C:
++		return start_clear_1200c(ops, ctx);
++	case START_UPLOAD:
++		return qcom_usb4_mcu_upload(cfg->mcu, cfg->firmware, cfg->firmware_size);
++	case START_DROM:
++		return qcom_usb4_mcu_write_drom(cfg->mcu, cfg->serial, 0);
++	case START_MCU:
++		return qcom_usb4_mcu_start(cfg->mcu, &state->shared_offset);
++	case START_PRESET:
++		ret = qcom_usb4_typec_preset_command(cfg->preset, &command);
++		if (ret)
++			return ret;
++		return qcom_usb4_mcu_command(cfg->mcu, command, cfg->command_timeout_us);
++	case START_PCIE:
++		if (cfg->pcie_policy == QCOM_USB4_START_PCIE_SKIP)
++			return 0;
++		return ops->update_router(ctx, 0x82010, 0xc, 0xc);
++	}
++	return -EINVAL;
++}
++
++int qcom_usb4_startup_run(struct qcom_usb4_start_state *state,
++			const struct qcom_usb4_start_config *cfg,
++			const struct qcom_usb4_start_ops *ops, void *context)
++{
++	unsigned int i;
++	int ret;
++
++	if (!state)
++		return -EINVAL;
++	if (state->phase != QCOM_USB4_START_NEW)
++		return state->phase == QCOM_USB4_START_RUNNING ? -EBUSY : -EALREADY;
++	state->phase = QCOM_USB4_START_RUNNING;
++	state->active_step = QCOM_USB4_START_VALIDATE;
++	state->last_completed_step = QCOM_USB4_START_NONE;
++	state->shared_offset = 0;
++	state->error = 0;
++	ret = start_validate(cfg, ops);
++	if (ret)
++		goto failed;
++	state->last_completed_step = state->active_step;
++	state->active_step = QCOM_USB4_START_OWNER_CHECK;
++	ret = ops->owner_check(context, cfg);
++	if (ret)
++		goto failed;
++	state->last_completed_step = state->active_step;
++
++	for (i = 0; i < ARRAY_SIZE(start_operations); i++) {
++		state->active_step = start_operations[i].step;
++		ret = start_execute(&start_operations[i], state, cfg, ops, context);
++		if (ret)
++			goto failed;
++		state->last_completed_step = state->active_step;
++	}
++	state->active_step = QCOM_USB4_START_NONE;
++	state->phase = QCOM_USB4_START_COMPLETE;
++	return 0;
++
++failed:
++	state->error = ret < 0 ? ret : -EPROTO;
++	state->phase = QCOM_USB4_START_FAILED;
++	return state->error;
++}
+diff --git a/drivers/thunderbolt/qcom-usb4-startup.h b/drivers/thunderbolt/qcom-usb4-startup.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..4967947490644f8ead4e74a5dbc74706421aabc1
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-startup.h
+@@ -0,0 +1,145 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef QCOM_USB4_STARTUP_H
++#define QCOM_USB4_STARTUP_H
++
++#include "qcom-usb4-mcu.h"
++#include "qcom-usb4-typec.h"
++
++enum qcom_usb4_start_profile {
++	QCOM_USB4_START_PROFILE_UNSET,
++	QCOM_USB4_START_SURFACE_A8_PORT0,
++};
++
++enum qcom_usb4_start_pcie_policy {
++	QCOM_USB4_START_PCIE_UNSET,
++	QCOM_USB4_START_PCIE_SKIP,
++	QCOM_USB4_START_PCIE_ENABLE,
++};
++
++enum qcom_usb4_start_phase {
++	QCOM_USB4_START_NEW,
++	QCOM_USB4_START_RUNNING,
++	QCOM_USB4_START_FAILED,
++	QCOM_USB4_START_COMPLETE,
++};
++
++enum qcom_usb4_start_step {
++	QCOM_USB4_START_NONE,
++	QCOM_USB4_START_VALIDATE,
++	QCOM_USB4_START_OWNER_CHECK,
++	QCOM_USB4_START_RX_PAD_PREPARE,
++	QCOM_USB4_START_TX_B_PAD_PREPARE,
++	QCOM_USB4_START_TX_A_PAD_PREPARE,
++	QCOM_USB4_START_RX_CLOCKS_REFERENCE,
++	QCOM_USB4_START_USB4_RESET_ASSERT,
++	QCOM_USB4_START_COMBO_RESET_ASSERT,
++	QCOM_USB4_START_DP_RESET_ASSERT,
++	QCOM_USB4_START_ASSERT_STALL,
++	QCOM_USB4_START_ASSERT_SETTLE,
++	QCOM_USB4_START_DP_RESET_DEASSERT,
++	QCOM_USB4_START_COMBO_RESET_DEASSERT,
++	QCOM_USB4_START_USB4_RESET_DEASSERT,
++	QCOM_USB4_START_CLOCK_READY,
++	QCOM_USB4_START_DEASSERT_SETTLE,
++	QCOM_USB4_START_RX_CLOCKS_PHY,
++	QCOM_USB4_START_ROUTER_1200C_CLEAR,
++	QCOM_USB4_START_RX_PAD_ACTIVE,
++	QCOM_USB4_START_TX_B_PAD_ACTIVE,
++	QCOM_USB4_START_TX_A_PAD_ACTIVE,
++	QCOM_USB4_START_ROUTER_81000_SET,
++	QCOM_USB4_START_GCC_600C0_BIT3_SET,
++	QCOM_USB4_START_CONTROL_ASSERT_STALL,
++	QCOM_USB4_START_CONTROL_ASSERT_SETTLE,
++	QCOM_USB4_START_ROUTER_81018_SET,
++	QCOM_USB4_START_GCC_600C0_BIT3_CLEAR,
++	QCOM_USB4_START_CONTROL_DEASSERT_STALL,
++	QCOM_USB4_START_CONTROL_DEASSERT_SETTLE,
++	QCOM_USB4_START_ROUTER_81000_CLEAR,
++	QCOM_USB4_START_FIRMWARE_UPLOAD,
++	QCOM_USB4_START_SYS_MEMORY_FORCE,
++	QCOM_USB4_START_DROM,
++	QCOM_USB4_START_TCSR_ROUTE,
++	QCOM_USB4_START_PIPE_HWCG_OFF,
++	QCOM_USB4_START_ROUTER_81004_SET,
++	QCOM_USB4_START_TIMER_HIGH,
++	QCOM_USB4_START_TIMER_LOW,
++	QCOM_USB4_START_TIMER_8148,
++	QCOM_USB4_START_TIMER_8144,
++	QCOM_USB4_START_PHY_COMPOSITE,
++	QCOM_USB4_START_ADAPTER_BIT23,
++	QCOM_USB4_START_ADAPTER_BIT22,
++	QCOM_USB4_START_ADAPTER_BIT21,
++	QCOM_USB4_START_MCU,
++	QCOM_USB4_START_PRESET,
++	QCOM_USB4_START_PCIE_POLICY,
++};
++
++struct qcom_usb4_start_config {
++	enum qcom_usb4_start_profile profile;
++	enum qcom_usb4_start_pcie_policy pcie_policy;
++	struct qcom_usb4_mcu *mcu;
++	const u8 *firmware;
++	size_t firmware_size;
++	u32 serial;
++	u32 preset;
++	unsigned int command_timeout_us;
++	struct qcom_usb4_pan_connect connection;
++};
++
++/*
++ * Zero-initialize once for a fresh, owner-established cold-start attempt.
++ * Failure may have partial hardware effects, including in active_step itself.
++ * This state is not a rollback log or proof that firmware/DMA has halted.
++ */
++struct qcom_usb4_start_state {
++	enum qcom_usb4_start_phase phase;
++	enum qcom_usb4_start_step active_step;
++	enum qcom_usb4_start_step last_completed_step;
++	int error;
++	u32 shared_offset;
++};
++
++/*
++ * Integer callbacks return 0 on completed success or a negative errno.
++ * Positive statuses are rejected. The caller serializes the sleepable operation,
++ * retains immutable inputs, and owns all mappings/providers until recovery.
++ *
++ * owner_check must verify this exact board/image, empty PHYC, powered/exclusive
++ * cold state and inactive shared DP before any effectful callback. Holding the
++ * shared owners' locks is required; merely observing MODE clear is insufficient.
++ * No MCU/DMA/NHI traffic or Type-C command may race this sequence.
++ *
++ * provider implements only the typed provider steps in the source table, using
++ * the owning pinctrl/clock/reset/PHY interfaces. CLOCK_READY needs a finite,
++ * explicit readiness policy; the vendor's impossible clock predicate is not
++ * copied. PHY_COMPOSITE must include common PHY setup, then the separate DP
++ * producer/AUX operation, then table/start/calibration. The existing bare PHY
++ * callback does not yet supply that composite operation. RX clock transitions
++ * must establish both selectors, with both gates off around the switch.
++ *
++ * Router offsets below refer to the expanded router window, never GCC/TLMM.
++ * update_router preserves bits outside mask. delay_us must honor the requested
++ * minimum delay and return only when complete. No provider backend is supplied.
++ */
++struct qcom_usb4_start_ops {
++	int (*owner_check)(void *context, const struct qcom_usb4_start_config *cfg);
++	int (*provider)(void *context, enum qcom_usb4_start_step step,
++			const struct qcom_usb4_start_config *cfg);
++	int (*read_router)(void *context, u32 offset, u32 *value);
++	int (*update_router)(void *context, u32 offset, u32 mask, u32 value);
++	void (*delay_us)(void *context, unsigned int usec);
++};
++
++/*
++ * One attempt only: no automatic restart, rollback, connect command, NHI
++ * registration, event consumer, suspend or shutdown. Success means only this
++ * forward sequence completed. On failure no later step is attempted. The owner
++ * must decide recovery, even when a callback reports failure before completion.
++ * The existing MCU-start helper locally clears RUN/host-ready after a timeout
++ * or bad shared pointer. This is not whole-sequence rollback or physical halt.
++ */
++int qcom_usb4_startup_run(struct qcom_usb4_start_state *state,
++			const struct qcom_usb4_start_config *cfg,
++			const struct qcom_usb4_start_ops *ops, void *context);
++
++#endif
+diff --git a/drivers/thunderbolt/qcom-usb4-typec.c b/drivers/thunderbolt/qcom-usb4-typec.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2acc0e81e8087ae1f34957b143a76e87932fad36
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-typec.c
+@@ -0,0 +1,166 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Original encoder of the Surface Qualcomm USB4 MCU mailbox contract.
++ * Evidence: TYPEC-MAILBOX.md, UCSI 0xac18..0xace4 and filter 0x14720.
++ * Command completion, power sequencing and link readiness belong to callers;
++ * encoding a word does not establish that the MCU can accept it.
++ */
++#include <linux/errno.h>
++#include <linux/usb/pd.h>
++
++#include "qcom-usb4-typec.h"
++
++int qcom_usb4_typec_connect_command(const struct qcom_usb4_pan_connect *pan,
++				   u32 *command)
++{
++	u32 cable_class;
++
++	if (!pan || !command)
++		return -EINVAL;
++	if (pan->mode > QCOM_USB4_TUNNEL_USB4 ||
++	    pan->orientation > QCOM_USB4_PAN_REVERSE ||
++	    pan->rounded > 1 || pan->board_retimer > 1)
++		return -EINVAL;
++	if (pan->cable_type > QCOM_USB4_PAN_RETIMER || pan->cable_speed > 1)
++		return -EOPNOTSUPP;
++
++	cable_class = 0;
++	if (pan->cable_type == QCOM_USB4_PAN_RETIMER) {
++		cable_class = 1;
++		if (pan->mode == QCOM_USB4_TUNNEL_TBT && !pan->rounded)
++			cable_class = 3;
++	}
++
++	*command = 1U | (u32)pan->mode << 8 | (u32)pan->orientation << 9 |
++		   (u32)pan->board_retimer << 10 | cable_class << 11 |
++		   (u32)pan->cable_speed << 13;
++	return 0;
++}
++
++int qcom_usb4_typec_usb4_command(const struct enter_usb_data *data,
++				enum typec_orientation orientation,
++				u8 board_retimer, u32 *command)
++{
++	struct qcom_usb4_pan_connect pan = {
++		.mode = QCOM_USB4_TUNNEL_USB4,
++		.board_retimer = board_retimer,
++	};
++	u32 speed;
++
++	if (!data || !command)
++		return -EINVAL;
++	if (((data->eudo & EUDO_USB_MODE_MASK) >> EUDO_USB_MODE_SHIFT) !=
++	    EUDO_USB_MODE_USB4)
++		return -EINVAL;
++	if (data->active_link_training)
++		return -EOPNOTSUPP;
++
++	switch (orientation) {
++	case TYPEC_ORIENTATION_NORMAL:
++		pan.orientation = QCOM_USB4_PAN_NORMAL;
++		break;
++	case TYPEC_ORIENTATION_REVERSE:
++		pan.orientation = QCOM_USB4_PAN_REVERSE;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	speed = (data->eudo & EUDO_CABLE_SPEED_MASK) >> EUDO_CABLE_SPEED_SHIFT;
++	switch (speed) {
++	case EUDO_CABLE_SPEED_USB4_GEN2:
++		pan.cable_speed = 0;
++		break;
++	case EUDO_CABLE_SPEED_USB4_GEN3:
++		pan.cable_speed = 1;
++		break;
++	default:
++		return -EOPNOTSUPP;
++	}
++	pan.cable_type = (data->eudo & EUDO_CABLE_TYPE_MASK) >> EUDO_CABLE_TYPE_SHIFT;
++
++	return qcom_usb4_typec_connect_command(&pan, command);
++}
++
++int qcom_usb4_typec_tbt_command(const struct typec_thunderbolt_data *data,
++			      enum typec_orientation orientation,
++			      u8 board_retimer, u32 *command)
++{
++	struct qcom_usb4_pan_connect pan = {
++		.mode = QCOM_USB4_TUNNEL_TBT,
++		.board_retimer = board_retimer,
++	};
++	u32 cable, enter, speed, rounded;
++	bool active, retimer;
++
++	if (!data || !command)
++		return -EINVAL;
++	cable = data->cable_mode;
++	enter = data->enter_vdo;
++	if (!(data->device_mode & TBT_MODE) || !(cable & TBT_MODE) ||
++	    !(enter & TBT_MODE))
++		return -EINVAL;
++	if (TBT_ADAPTER(data->device_mode) != TBT_ADAPTER_TBT3)
++		return -EOPNOTSUPP;
++	if ((cable | enter) & (TBT_CABLE_OPTICAL | TBT_CABLE_LINK_TRAINING))
++		return -EOPNOTSUPP;
++
++	active = !!(cable & TBT_CABLE_ACTIVE_PASSIVE);
++	retimer = !!(cable & TBT_CABLE_RETIMER);
++	if (active != !!(enter & TBT_ENTER_MODE_ACTIVE_CABLE) ||
++	    retimer != !!(enter & TBT_CABLE_RETIMER) || (!active && retimer))
++		return -EINVAL;
++	/* Redriver or old GLINK active-only data must not become a retimer. */
++	if (active && !retimer)
++		return -EOPNOTSUPP;
++	pan.cable_type = retimer ? QCOM_USB4_PAN_RETIMER : QCOM_USB4_PAN_PASSIVE;
++
++	speed = TBT_CABLE_SPEED(cable);
++	if (speed != TBT_CABLE_SPEED(enter))
++		return -EINVAL;
++	switch (speed) {
++	case TBT_CABLE_USB3_PASSIVE:
++		pan.cable_speed = 0;
++		break;
++	case TBT_CABLE_10_AND_20GBPS:
++		pan.cable_speed = 1;
++		break;
++	default:
++		return -EOPNOTSUPP;
++	}
++	rounded = TBT_CABLE_ROUNDED_SUPPORT(cable);
++	if (rounded != TBT_CABLE_ROUNDED_SUPPORT(enter))
++		return -EINVAL;
++	if (rounded > 1)
++		return -EOPNOTSUPP;
++	pan.rounded = rounded;
++
++	switch (orientation) {
++	case TYPEC_ORIENTATION_NORMAL:
++		pan.orientation = QCOM_USB4_PAN_NORMAL;
++		break;
++	case TYPEC_ORIENTATION_REVERSE:
++		pan.orientation = QCOM_USB4_PAN_REVERSE;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return qcom_usb4_typec_connect_command(&pan, command);
++}
++
++int qcom_usb4_typec_preset_command(u32 preset, u32 *command)
++{
++	if (!command || preset > 0xffff)
++		return -EINVAL;
++	*command = 2U | preset << 8;
++	return 0;
++}
++
++int qcom_usb4_typec_disconnect_command(u32 *command)
++{
++	if (!command)
++		return -EINVAL;
++	*command = 6;
++	return 0;
++}
+diff --git a/drivers/thunderbolt/qcom-usb4-typec.h b/drivers/thunderbolt/qcom-usb4-typec.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe90e894d322ee61babb58952b637dd0140c03c1
+--- /dev/null
++++ b/drivers/thunderbolt/qcom-usb4-typec.h
+@@ -0,0 +1,70 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef QCOM_USB4_TYPEC_H
++#define QCOM_USB4_TYPEC_H
++
++#include <linux/types.h>
++#include <linux/usb/typec.h>
++#include <linux/usb/typec_tbt.h>
++
++enum qcom_usb4_tunnel_mode {
++	QCOM_USB4_TUNNEL_TBT = 0,
++	QCOM_USB4_TUNNEL_USB4 = 1,
++};
++
++/* PAN wire values, deliberately distinct from enum typec_orientation. */
++enum qcom_usb4_pan_orientation {
++	QCOM_USB4_PAN_NORMAL = 0,
++	QCOM_USB4_PAN_REVERSE = 1,
++};
++
++enum qcom_usb4_pan_cable_type {
++	QCOM_USB4_PAN_PASSIVE = 0,
++	QCOM_USB4_PAN_RETIMER = 1,
++};
++
++/*
++ * Validated PAN fields for the observed Surface PS8830 path.
++ * cable_speed is the PAN value 0/1: USB4 Gen2/Gen3 respectively;
++ * TBT maps these to TBT_CABLE_USB3_PASSIVE/TBT_CABLE_10_AND_20GBPS.
++ * rounded and board_retimer must be 0/1. The latter describes the board,
++ * never the cable. Determine it from verified board configuration.
++ * Do not truncate raw fields before calling: unavailable mode/orientation,
++ * unsupported cable types and higher cable speeds must remain distinguishable.
++ */
++struct qcom_usb4_pan_connect {
++	u8 mode;
++	u8 orientation;
++	u8 cable_type;
++	u8 cable_speed;
++	u8 rounded;
++	u8 board_retimer;
++};
++
++/* All helpers leave *command unchanged on error. They perform no hardware I/O. */
++int qcom_usb4_typec_connect_command(const struct qcom_usb4_pan_connect *pan,
++				   u32 *command);
++
++/*
++ * Adapter for TYPEC_MODE_USB4's enter_usb_data, not a mux callback.
++ * Caller must establish the payload's mode/type before passing it here.
++ * Gen4, redriver, optical and active-link-training cases are unsupported.
++ */
++int qcom_usb4_typec_usb4_command(const struct enter_usb_data *data,
++				enum typec_orientation orientation,
++				u8 board_retimer, u32 *command);
++
++/*
++ * Adapter for a verified TBT modal payload. Requires standard cable-type and
++ * Enter Mode flags, including TBT_CABLE_RETIMER for a retimer cable. The older
++ * GLINK producer omits this flag; its ambiguous active payload is rejected.
++ * Optical/redriver cables, link training and unsupported rates are rejected.
++ */
++int qcom_usb4_typec_tbt_command(const struct typec_thunderbolt_data *data,
++			      enum typec_orientation orientation,
++			      u8 board_retimer, u32 *command);
++
++/* Only packs a verified 16-bit PMSK/preset; does not choose or apply a preset. */
++int qcom_usb4_typec_preset_command(u32 preset, u32 *command);
++int qcom_usb4_typec_disconnect_command(u32 *command);
++
++#endif
+diff --git a/include/linux/soc/qcom/usb4-dp.h b/include/linux/soc/qcom/usb4-dp.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..18f8b49e08755efa0363810ccb66a271040e591c
+--- /dev/null
++++ b/include/linux/soc/qcom/usb4-dp.h
+@@ -0,0 +1,48 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _QCOM_USB4_DP_H
++#define _QCOM_USB4_DP_H
++
++#include <linux/errno.h>
++#include <linux/kconfig.h>
++#include <linux/types.h>
++
++struct device;
++struct drm_dp_aux;
++
++/* Surface 8 opt-in experiment; not a general upstream provider ABI.
++ * Callbacks may sleep. They must not re-enter the MSM AUX wrapper.
++ * The caller retains aux, ops and data until detach has returned.
++ * Exported calls acquire the display device lock; callers must not hold it.
++ */
++struct msm_dp_usb4_ops {
++	int (*configure_link)(void *data, unsigned int rate, unsigned int lanes);
++	int (*train_link)(void *data, unsigned int rate, unsigned int lanes);
++	/* Prepare the sink and both tunnel adapters for FEC before training.
++	 * Must write DPCD FEC_READY and complete any required SET_FEC_READY
++	 * acknowledgment. Return an error if this is unsupported or uncertain.
++	 * Runs with the MSM AUX mutex held; must not re-enter its wrapper.
++	 */
++	int (*set_fec_ready)(void *data, bool ready);
++	void (*unconfigure_link)(void *data);
++};
++
++#if IS_REACHABLE(CONFIG_DRM_MSM)
++int msm_dp_usb4_attach(struct device *dev, struct drm_dp_aux *aux,
++		      const struct msm_dp_usb4_ops *ops, void *data);
++void msm_dp_usb4_detach(struct device *dev);
++int msm_dp_usb4_hpd(struct device *dev, bool connected, bool irq);
++/* Returns -EBUSY on disconnect while DRM still owns an active/prepared link. */
++int msm_dp_usb4_hpd_sync(struct device *dev, bool connected, bool irq);
++int msm_dp_usb4_route(struct device *dev, unsigned int resource);
++#else
++static inline int msm_dp_usb4_attach(struct device *dev, struct drm_dp_aux *aux,
++		const struct msm_dp_usb4_ops *ops, void *data) { return -ENODEV; }
++static inline void msm_dp_usb4_detach(struct device *dev) { }
++static inline int msm_dp_usb4_hpd(struct device *dev, bool connected, bool irq)
++{ return -ENODEV; }
++static inline int msm_dp_usb4_hpd_sync(struct device *dev, bool connected, bool irq)
++{ return -ENODEV; }
++static inline int msm_dp_usb4_route(struct device *dev, unsigned int resource)
++{ return -ENODEV; }
++#endif
++#endif

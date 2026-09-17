@@ -1,0 +1,44 @@
+--- a/drivers/thunderbolt/nhi.c
++++ b/drivers/thunderbolt/nhi.c
+@@ -158,11 +158,19 @@
+ /*
+  * nhi_disable_interrupts() - disable interrupts for all rings
+  *
+- * Use only during init and shutdown.
++ * Use only during init and shutdown, without the NHI lock held. The caller
++ * must keep MMIO accessible and serialize against interrupt rearming. This
++ * does not release physical IRQs or drain interrupt work.
+  */
+ void nhi_disable_interrupts(struct tb_nhi *nhi)
+ {
+ 	int i = 0;
++
++	if (nhi->ops->disable_interrupts) {
++		nhi->ops->disable_interrupts(nhi);
++		return;
++	}
++
+ 	/* disable interrupts */
+ 	for (i = 0; i < RING_INTERRUPT_REG_COUNT(nhi); i++)
+ 		nhi_mask_interrupt(nhi, ~0, 4 * i);
+--- a/drivers/thunderbolt/nhi.h
++++ b/drivers/thunderbolt/nhi.h
+@@ -63,6 +63,10 @@
+  * @is_present: Whether the device is currently present on the parent bus
+  * @init_interrupts: NHI specific interrupt initialization hook
+  * @reset_interface: Resets the host interface
++ * @disable_interrupts: Optional controller-wide interrupt mask/clear transport.
++ *	  Called during init (before @init_interrupts) and shutdown without
++ *	  the NHI lock held. The caller must keep MMIO accessible and serialize
++ *	  against interrupt rearming. Does not release IRQs or drain work.
+  * @ring_interrupt_mask: Optional per-cause mask/unmask transport. Used for
+  *	  ring activation, stop and polling; %true masks, %false unmasks.
+  *	  Called with the NHI lock held and must not sleep. Does not configure
+@@ -82,6 +86,7 @@
+ 	bool (*is_present)(struct tb_nhi *nhi);
+ 	int (*init_interrupts)(struct tb_nhi *nhi);
+ 	void (*reset_interface)(struct tb_nhi *nhi);
++	void (*disable_interrupts)(struct tb_nhi *nhi);
+ 	void (*ring_interrupt_mask)(struct tb_nhi *nhi, unsigned int cause,
+ 				    bool mask);
+ };

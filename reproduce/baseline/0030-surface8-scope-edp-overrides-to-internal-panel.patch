@@ -1,0 +1,62 @@
+--- a/drivers/gpu/drm/msm/dp/dp_ctrl.c
++++ b/drivers/gpu/drm/msm/dp/dp_ctrl.c
+@@ -1592,9 +1592,11 @@
+ 	 * Bring-up (Surface Laptop 8, glymur/mahua): the Sharp LQ138P1JX61 eDP
+ 	 * 1.4 panel advertises TPS4 but channel equalisation never completes
+ 	 * with it, while the firmware trains the same panel as a DPCD 1.2 sink
+-	 * (TPS3). Prefer TPS3 until the TPS4 path on this SoC is understood.
++	 * (TPS3). Keep this provisional restriction on the internal panel only;
++	 * external DisplayPort sinks must use their normal training sequence.
+ 	 */
+-	if (0 && drm_dp_tps4_supported(panel->dpcd)) {
++	if (panel->connector->connector_type != DRM_MODE_CONNECTOR_eDP &&
++	    drm_dp_tps4_supported(panel->dpcd)) {
+ 		pattern = DP_TRAINING_PATTERN_4;
+ 		state_ctrl_bit = 4;
+ 	} else if (drm_dp_tps3_supported(panel->dpcd)) {
+--- a/drivers/gpu/drm/msm/dp/dp_panel.c
++++ b/drivers/gpu/drm/msm/dp/dp_panel.c
+@@ -94,13 +94,14 @@
+ 	}
+ }
+ 
+-static int msm_dp_panel_read_dpcd(struct msm_dp_panel *msm_dp_panel)
++static int msm_dp_panel_read_dpcd(struct msm_dp_panel *msm_dp_panel, bool is_edp)
+ {
+ 	int rc, max_lttpr_lanes, max_lttpr_rate;
+ 	struct msm_dp_panel_private *panel;
+ 	struct msm_dp_link_info *link_info;
+ 	struct msm_dp_link *link;
+ 	u8 *dpcd, major, minor;
++	bool force_max_link_rate = is_edp && edp_force_max_link_rate;
+ 
+ 	panel = container_of(msm_dp_panel, struct msm_dp_panel_private, msm_dp_panel);
+ 	dpcd = msm_dp_panel->dpcd;
+@@ -122,7 +123,7 @@
+ 	max_lttpr_rate = drm_dp_lttpr_max_link_rate(link->lttpr_common_caps);
+ 
+ 	/* eDP sink */
+-	if (msm_dp_panel->dpcd[DP_EDP_CONFIGURATION_CAP] && !edp_force_max_link_rate) {
++	if (msm_dp_panel->dpcd[DP_EDP_CONFIGURATION_CAP] && !force_max_link_rate) {
+ 		u8 edp_rev;
+ 
+ 		rc = drm_dp_dpcd_read_byte(panel->aux, DP_EDP_DPCD_REV, &edp_rev);
+@@ -188,7 +189,7 @@
+ 		link_info->rate = drm_dp_max_link_rate(dpcd);
+ 
+ 		/* Limit link rate from link-frequencies of endpoint property of dtsi */
+-		if (link_info->rate > link->max_dp_link_rate && !edp_force_max_link_rate)
++		if (link_info->rate > link->max_dp_link_rate && !force_max_link_rate)
+ 			link_info->rate = link->max_dp_link_rate;
+ 
+ 		/* Limit link rate from LTTPR capabilities, if any */
+@@ -255,7 +256,8 @@
+ 
+ 	panel = container_of(msm_dp_panel, struct msm_dp_panel_private, msm_dp_panel);
+ 
+-	rc = msm_dp_panel_read_dpcd(msm_dp_panel);
++	rc = msm_dp_panel_read_dpcd(msm_dp_panel,
++				     connector->connector_type == DRM_MODE_CONNECTOR_eDP);
+ 	if (rc) {
+ 		DRM_ERROR("read dpcd failed %d\n", rc);
+ 		return rc;

@@ -1,0 +1,211 @@
+--- a/drivers/thunderbolt/qcom-usb4-dp.c
++++ b/drivers/thunderbolt/qcom-usb4-dp.c
+@@ -15,6 +15,7 @@
+ #include <linux/io.h>
+ #include <linux/iopoll.h>
+ #include <linux/jiffies.h>
++#include <linux/module.h>
+ #include <linux/mutex.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
+@@ -59,6 +60,10 @@
+ #define DP_CAPS_POLL_MS		20
+ #define DP_CAPS_MAX_POLLS	500
+ 
++static bool fec_dsc_probe;
++module_param(fec_dsc_probe, bool, 0400);
++MODULE_PARM_DESC(fec_dsc_probe, "Diagnostic only: expose DSC with one pretraining FEC setup");
++
+ struct qcom_usb4_dp {
+ 	struct device *dev;
+ 	void __iomem *router;
+@@ -79,6 +84,9 @@
+ 	bool runtime_held;
+ 	unsigned int caps_polls;
+ 	unsigned int messages;
++	bool fec_setup_attempted;
++	bool fec_trace;
++	unsigned int fec_trace_events;
+ };
+ 
+ static void __iomem *dp_base(struct qcom_usb4_dp *dp, unsigned int adapter)
+@@ -135,6 +143,15 @@
+ 	for (i = 0; i < *count; i += 4)
+ 		put_unaligned_le32(readl(base + DP_FIFO_RX_DATA + i), payload + i);
+ consume:
++	if (dp->fec_trace && dp->fec_trace_events < 64) {
++		dp->fec_trace_events++;
++		if (!ret)
++			dev_info(dp->dev, "FEC trace RX type=%u data=%*ph\n",
++				 *type, *count, payload);
++		else
++			dev_info(dp->dev, "FEC trace RX error=%d header=%#x status=%#x\n",
++				 ret, header, status);
++	}
+ 	/* Complete the payload reads before releasing the receive slot. */
+ 	mb();
+ 	writel(1, base + DP_FIFO_RX_CONSUME);
+@@ -173,6 +190,11 @@
+ 	if (count > sizeof(padded))
+ 		return -EINVAL;
+ 	memcpy(padded, payload, count);
++	if (dp->fec_trace && dp->fec_trace_events < 64) {
++		dp->fec_trace_events++;
++		dev_info(dp->dev, "FEC trace TX type=%u data=%*ph\n",
++			 type, count, payload);
++	}
+ 	writel(DP_IRQ_TX_DONE | DP_IRQ_RX_READY, base + DP_IRQ_CLEAR);
+ 	for (i = 0; i < sizeof(padded); i += 4)
+ 		writel(get_unaligned_le32(padded + i), base + DP_FIFO_TX_DATA + i);
+@@ -306,6 +328,9 @@
+ 	ret = dp_fifo_drain(dp);
+ 	if (ret)
+ 		goto fault;
++	/* Diagnostic capture only: preserve AUX/control handling unchanged. */
++	if (request == DP_AUX_NATIVE_WRITE && msg->address == DP_FEC_CONFIGURATION)
++		dp->fec_trace = true;
+ 	ret = dp_fifo_tx(dp, DP_PACKET_AUX, tx, tx_count);
+ 	if (ret)
+ 		goto fault;
+@@ -404,6 +429,62 @@
+ 	return qcom_usb4_dp_configure_link(dp->router, dp_dpsw, dp, rate, lanes);
+ }
+ 
++/* One RAM-test FEC setup before training, never a live-stream command. */
++static int dp_set_fec_ready_probe(void *ctx, bool enable)
++{
++	struct qcom_usb4_dp *dp = ctx;
++	u8 ready, status, tx[4] = { enable, 0x0a, 0, 0 }, rx[4] = {};
++	int ret;
++
++	if (!fec_dsc_probe)
++		return -EOPNOTSUPP;
++	mutex_lock(&dp->fifo_lock);
++	if (dp->fec_setup_attempted) {
++		mutex_unlock(&dp->fifo_lock);
++		return -EBUSY;
++	}
++	dp->fec_setup_attempted = true;
++	mutex_unlock(&dp->fifo_lock);
++
++	/* Receiver readiness may survive a host reset. Require encoding off. */
++	ret = drm_dp_dpcd_read_byte(&dp->aux, DP_FEC_CONFIGURATION, &ready);
++	if (ret)
++		return ret;
++	if (ready != 0 && ready != DP_FEC_READY)
++		return -EINVAL;
++	ret = drm_dp_dpcd_read_byte(&dp->aux, DP_FEC_STATUS, &status);
++	if (ret)
++		return ret;
++	if (status)
++		return -EBUSY;
++	dev_info(dp->dev, "FEC DSC probe begin: retained readiness=%#x\n", ready);
++	if (ready) {
++		ret = drm_dp_dpcd_write_byte(&dp->aux, DP_FEC_CONFIGURATION, 0);
++		if (ret)
++			return ret;
++		ret = drm_dp_dpcd_read_byte(&dp->aux, DP_FEC_CONFIGURATION, &ready);
++		if (ret)
++			return ret;
++		if (ready)
++			return -EIO;
++	}
++	if (enable) {
++		ret = drm_dp_dpcd_write_byte(&dp->aux, DP_FEC_CONFIGURATION, DP_FEC_READY);
++		if (ret)
++			return ret;
++		ret = drm_dp_dpcd_read_byte(&dp->aux, DP_FEC_CONFIGURATION, &ready);
++		if (ret)
++			return ret;
++		if (ready != DP_FEC_READY)
++			return -EIO;
++	}
++
++	/* dp_control owns fifo_lock and validates the echoed opcode. */
++	ret = dp_control(dp, tx, rx);
++	dev_info(dp->dev, "FEC DSC probe ret=%d reply=%*ph\n", ret, 4, rx);
++	return ret;
++}
++
+ static int dp_train_link(void *ctx, unsigned int rate, unsigned int lanes)
+ {
+ 	struct qcom_usb4_dp *dp = ctx;
+@@ -414,6 +495,12 @@
+ static const struct msm_dp_usb4_ops dp_producer_ops = {
+ 	.configure_link = dp_configure_link,
+ 	.train_link = dp_train_link,
++};
++
++static const struct msm_dp_usb4_ops dp_fec_probe_ops = {
++	.configure_link = dp_configure_link,
++	.train_link = dp_train_link,
++	.set_fec_ready = dp_set_fec_ready_probe,
+ };
+ 
+ static void dp_caps_work(struct work_struct *work)
+@@ -616,7 +703,9 @@
+ 	if (ret < 0)
+ 		goto put_display;
+ 	dp->runtime_held = true;
+-	ret = msm_dp_usb4_attach(dp->display, &dp->aux, &dp_producer_ops, dp);
++	ret = msm_dp_usb4_attach(dp->display, &dp->aux,
++				 fec_dsc_probe ? &dp_fec_probe_ops : &dp_producer_ops,
++				 dp);
+ 	if (ret)
+ 		goto put_runtime;
+ 	WRITE_ONCE(dp->enabled, true);
+--- a/drivers/gpu/drm/msm/dp/dp_ctrl.c
++++ b/drivers/gpu/drm/msm/dp/dp_ctrl.c
+@@ -528,6 +528,9 @@
+ 			goto disable_fec;
+ 		}
+ 		if (fec_sts & DP_FEC_DECODE_EN_DETECTED) {
++			if (msm_dp_aux_usb4_attached(ctrl->aux))
++				dev_info(ctrl->dev, "USB4 FEC decode detected: attempt=%d status=%#x\n",
++					 i + 1, fec_sts);
+ 			drm_dbg_dp(ctrl->drm_dev, "fec attempts %d status 0x%02x\n",
+ 				   i + 1, fec_sts);
+ 			return 0;
+@@ -1972,26 +1975,26 @@
+ 	msm_dp_ctrl_config_ctrl_link(ctrl, panel);
+ 	msm_dp_ctrl_config_ctrl_streams(ctrl, panel);
+ 
+-	/* Native FEC setup below is bypassed by autonomous USB4 training.
+-	 * Without a verified callback keep uncompressed tests unchanged and
+-	 * reject compressed streams before starting receiver training.
+-	 */
+-	if (msm_dp_aux_usb4_attached(ctrl->aux) &&
+-	    (panel->msm_dp_mode.dsc_en ||
+-	     (panel->fec_capable && msm_dp_aux_usb4_fec_supported(ctrl->aux)))) {
+-		ret = msm_dp_aux_usb4_set_fec_ready(ctrl->aux,
+-					       panel->msm_dp_mode.dsc_en);
+-		if (ret) {
+-			msm_dp_ctrl_usb4_reset(ctrl, false);
+-			return ret;
+-		}
+-		msm_dp_ctrl_fec_config(ctrl, false);
+-	}
+-
+ 	if (msm_dp_aux_usb4_attached(ctrl->aux)) {
+ 		msm_dp_ctrl_usb4_state_clear(ctrl, "pre-train");
+ 		msm_dp_ctrl_usb4_mainlink_config(ctrl);
+ 		msm_dp_ctrl_usb4_post_train(ctrl, false);
++
++		/* Native FEC setup below is bypassed by autonomous USB4 training.
++		 * Without a verified callback keep uncompressed tests unchanged and
++		 * reject compressed streams before starting receiver training.
++		 */
++		if (panel->msm_dp_mode.dsc_en ||
++		    (panel->fec_capable && msm_dp_aux_usb4_fec_supported(ctrl->aux))) {
++			ret = msm_dp_aux_usb4_set_fec_ready(ctrl->aux,
++							    panel->msm_dp_mode.dsc_en);
++			if (ret) {
++				msm_dp_ctrl_usb4_reset(ctrl, false);
++				return ret;
++			}
++			msm_dp_ctrl_fec_config(ctrl, false);
++		}
++
+ 		ret = msm_dp_aux_usb4_train_link(ctrl->aux,
+ 				ctrl->link->link_params.rate,
+ 				ctrl->link->link_params.num_lanes);

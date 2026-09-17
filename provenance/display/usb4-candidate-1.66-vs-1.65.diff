@@ -1,0 +1,134 @@
+--- a/drivers/gpu/drm/msm/dp/dp_ctrl.c
++++ b/drivers/gpu/drm/msm/dp/dp_ctrl.c
+@@ -511,33 +511,41 @@
+  * sequence can collide with blanking-start symbols, so the controller may
+  * need more than one attempt before the sink reports FEC decoding.
+  */
+-static void msm_dp_ctrl_fec_start(struct msm_dp_ctrl_private *ctrl)
+-{
+-	int i, max_retries = 3;
+-	u8 fec_sts = 0;
+-
+-	for (i = 0; i < max_retries; i++) {
++static int msm_dp_ctrl_fec_start(struct msm_dp_ctrl_private *ctrl)
++{
++	int i, ret;
++	u8 fec_sts;
++
++	for (i = 0; i < 3; i++) {
+ 		msm_dp_ctrl_fec_config(ctrl, true);
+ 
+ 		/* wait for the controller to start the FEC sequence */
+ 		usleep_range(900, 1000);
+ 
+-		drm_dp_dpcd_read_byte(ctrl->aux, DP_FEC_STATUS, &fec_sts);
+-		if (fec_sts & DP_FEC_DECODE_EN_DETECTED)
+-			break;
+-	}
+-
+-	drm_dbg_dp(ctrl->drm_dev, "fec attempts %d status 0x%02x\n", i + 1, fec_sts);
+-
+-	if (!(fec_sts & DP_FEC_DECODE_EN_DETECTED))
+-		DRM_ERROR("sink did not detect FEC\n");
++		ret = drm_dp_dpcd_read_byte(ctrl->aux, DP_FEC_STATUS, &fec_sts);
++		if (ret) {
++			DRM_ERROR("failed to read sink FEC status: %d\n", ret);
++			goto disable_fec;
++		}
++		if (fec_sts & DP_FEC_DECODE_EN_DETECTED) {
++			drm_dbg_dp(ctrl->drm_dev, "fec attempts %d status 0x%02x\n",
++				   i + 1, fec_sts);
++			return 0;
++		}
++	}
++
++	DRM_ERROR("sink did not detect FEC after %d attempts\n", i);
++	ret = -ETIMEDOUT;
++disable_fec:
++	msm_dp_ctrl_fec_config(ctrl, false);
++	return ret;
+ }
+ 
+ static bool dp_dsc_enable_first;
+ module_param(dp_dsc_enable_first, bool, 0644);
+ MODULE_PARM_DESC(dp_dsc_enable_first, "DP DSC: enable FEC and the sink decoder before the video starts");
+ 
+-static void msm_dp_ctrl_sink_dsc_enable(struct msm_dp_ctrl_private *ctrl, bool enable)
++static int msm_dp_ctrl_sink_dsc_enable(struct msm_dp_ctrl_private *ctrl, bool enable)
+ {
+ 	int rc;
+ 
+@@ -547,6 +555,8 @@
+ 		DRM_ERROR("failed to %s sink DSC: %d\n", str_enable_disable(enable), rc);
+ 	else
+ 		drm_dbg_dp(ctrl->drm_dev, "sink dsc %s\n", str_enabled_disabled(enable));
++
++	return rc;
+ }
+ 
+ static void msm_dp_ctrl_lane_mapping(struct msm_dp_ctrl_private *ctrl)
+@@ -2009,10 +2019,13 @@
+ 	 * sink to expect it after training, and keep the FEC sequence off
+ 	 * while the training patterns are sent.
+ 	 */
+-	if (panel->fec_capable)
+-		drm_dp_dpcd_write_byte(ctrl->aux, DP_FEC_CONFIGURATION,
+-				       panel->msm_dp_mode.dsc_en ? DP_FEC_READY : 0);
+ 	msm_dp_ctrl_fec_config(ctrl, false);
++	if (panel->fec_capable) {
++		ret = drm_dp_dpcd_write_byte(ctrl->aux, DP_FEC_CONFIGURATION,
++					     panel->msm_dp_mode.dsc_en ? DP_FEC_READY : 0);
++		if (ret)
++			return ret;
++	}
+ 
+ 	if (drm_dp_max_downspread(dpcd))
+ 		encoding[0] |= DP_SPREAD_AMP_0_5;
+@@ -3251,8 +3264,14 @@
+ 	msm_dp_ctrl_setup_tr_unit(ctrl, panel);
+ 
+ 	if (panel->msm_dp_mode.dsc_en && dp_dsc_enable_first) {
+-		msm_dp_ctrl_fec_start(ctrl);
+-		msm_dp_ctrl_sink_dsc_enable(ctrl, true);
++		ret = msm_dp_ctrl_fec_start(ctrl);
++		if (ret)
++			return ret;
++		ret = msm_dp_ctrl_sink_dsc_enable(ctrl, true);
++		if (ret) {
++			msm_dp_ctrl_fec_config(ctrl, false);
++			return ret;
++		}
+ 	}
+ 
+ 	if (msm_dp_aux_usb4_attached(ctrl->aux)) {
+@@ -3283,8 +3302,14 @@
+ 
+ 	/* FEC follows link training, then the sink starts decompressing */
+ 	if (panel->msm_dp_mode.dsc_en && !dp_dsc_enable_first) {
+-		msm_dp_ctrl_fec_start(ctrl);
+-		msm_dp_ctrl_sink_dsc_enable(ctrl, true);
++		ret = msm_dp_ctrl_fec_start(ctrl);
++		if (ret)
++			return ret;
++		ret = msm_dp_ctrl_sink_dsc_enable(ctrl, true);
++		if (ret) {
++			msm_dp_ctrl_fec_config(ctrl, false);
++			return ret;
++		}
+ 	}
+ 	if (panel->msm_dp_mode.dsc_en && msm_dp_panel_dsc_pps_late()) {
+ 		usleep_range(20000, 21000);
+--- a/drivers/gpu/drm/msm/dp/dp_display.c
++++ b/drivers/gpu/drm/msm/dp/dp_display.c
+@@ -2036,8 +2036,10 @@
+ 	}
+ 
+ 	rc = msm_dp_display_enable(dp, dp->panel);
+-	if (rc)
++	if (rc) {
+ 		DRM_ERROR("DP display enable failed, rc=%d\n", rc);
++		return;
++	}
+ 
+ 	rc = msm_dp_display_post_enable(msm_dp_display);
+ 	if (rc) {

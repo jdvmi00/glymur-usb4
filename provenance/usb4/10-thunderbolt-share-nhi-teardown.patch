@@ -1,0 +1,59 @@
+--- a/drivers/thunderbolt/nhi.h
++++ b/drivers/thunderbolt/nhi.h
+@@ -35,6 +35,7 @@
+ irqreturn_t nhi_msi(int irq, void *data);
+ irqreturn_t ring_msix(int irq, void *data);
+ int nhi_probe(struct tb_nhi *nhi);
++void nhi_remove(struct tb_nhi *nhi);
+ void nhi_shutdown(struct tb_nhi *nhi);
+ void nhi_reset_interface(struct tb_nhi *nhi);
+ 
+--- a/drivers/thunderbolt/nhi.c
++++ b/drivers/thunderbolt/nhi.c
+@@ -1144,6 +1144,29 @@
+ 		nhi->ops->shutdown(nhi);
+ }
+ 
++/**
++ * nhi_remove() - Remove a successfully probed host interface
++ * @nhi: Host interface to remove
++ *
++ * Drain the domain before shutting down the host interface. The caller must
++ * keep the device and its resources available until this function returns.
++ * Bus-specific shutdown policy, such as forcing host_reset, belongs to the
++ * caller. This is not the cleanup path for a failed nhi_probe().
++ */
++void nhi_remove(struct tb_nhi *nhi)
++{
++	struct device *dev = nhi->dev;
++	struct tb *tb = dev_get_drvdata(dev);
++
++	pm_runtime_get_sync(dev);
++	pm_runtime_dont_use_autosuspend(dev);
++	pm_runtime_forbid(dev);
++
++	tb_domain_remove(tb);
++	wait_for_completion(&nhi->domain_released);
++	nhi_shutdown(nhi);
++}
++
+ static void nhi_reset(struct tb_nhi *nhi)
+ {
+ 	ktime_t timeout;
+--- a/drivers/thunderbolt/pci.c
++++ b/drivers/thunderbolt/pci.c
+@@ -514,13 +514,7 @@
+ 	if (reset)
+ 		nhi->host_reset = true;
+ 
+-	pm_runtime_get_sync(&pdev->dev);
+-	pm_runtime_dont_use_autosuspend(&pdev->dev);
+-	pm_runtime_forbid(&pdev->dev);
+-
+-	tb_domain_remove(tb);
+-	wait_for_completion(&nhi->domain_released);
+-	nhi_shutdown(nhi);
++	nhi_remove(nhi);
+ }
+ 
+ static void nhi_pci_remove(struct pci_dev *pdev)

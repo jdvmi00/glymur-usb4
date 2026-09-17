@@ -1,0 +1,20 @@
+--- a/drivers/thunderbolt/nhi.c
++++ b/drivers/thunderbolt/nhi.c
+@@ -418,7 +418,7 @@
+  * @ring: Ring to re-start the interrupt
+  *
+  * This will re-start (unmask) the ring interrupt once the user is done
+- * with polling.
++ * with polling, provided the ring is still running and the NHI is not going away.
+  */
+ void tb_ring_poll_complete(struct tb_ring *ring)
+ {
+@@ -426,7 +426,7 @@
+ 
+ 	spin_lock_irqsave(&ring->nhi->lock, flags);
+ 	spin_lock(&ring->lock);
+-	if (ring->start_poll)
++	if (ring->start_poll && ring->running && !ring->nhi->going_away)
+ 		__ring_interrupt_mask(ring, false);
+ 	spin_unlock(&ring->lock);
+ 	spin_unlock_irqrestore(&ring->nhi->lock, flags);

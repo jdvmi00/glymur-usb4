@@ -1,0 +1,55 @@
+diff --git i/drivers/gpu/drm/msm/adreno/a6xx_gpu.c w/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+index f9de932..0378214 100644
+--- i/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
++++ w/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+@@ -2897,7 +2897,7 @@ const struct adreno_gpu_funcs a7xx_gpu_funcs = {
+ 
+ const struct adreno_gpu_funcs a8xx_gpu_funcs = {
+ 	.base = {
+-		.get_param = adreno_get_param,
++		.get_param = a8xx_get_param,
+ 		.set_param = adreno_set_param,
+ 		.hw_init = a8xx_hw_init,
+ 		.ucode_load = a6xx_ucode_load,
+diff --git i/drivers/gpu/drm/msm/adreno/a6xx_gpu.h w/drivers/gpu/drm/msm/adreno/a6xx_gpu.h
+index b50c57f..e029adc 100644
+--- i/drivers/gpu/drm/msm/adreno/a6xx_gpu.h
++++ w/drivers/gpu/drm/msm/adreno/a6xx_gpu.h
+@@ -337,6 +337,8 @@ u64 a8xx_gmu_get_timestamp(struct msm_gpu *gpu);
+ u64 a8xx_gpu_busy(struct msm_gpu *gpu, unsigned long *out_sample_rate);
+ int a8xx_gpu_feature_probe(struct msm_gpu *gpu);
+ void a8xx_gpu_get_slice_info(struct msm_gpu *gpu);
++int a8xx_get_param(struct msm_gpu *gpu, struct msm_context *ctx,
++		   u32 param, u64 *value, u32 *len);
+ int a8xx_hw_init(struct msm_gpu *gpu);
+ irqreturn_t a8xx_irq(struct msm_gpu *gpu);
+ void a8xx_llc_activate(struct a6xx_gpu *a6xx_gpu);
+diff --git i/drivers/gpu/drm/msm/adreno/a8xx_gpu.c w/drivers/gpu/drm/msm/adreno/a8xx_gpu.c
+index add93c1..0a41f61 100644
+--- i/drivers/gpu/drm/msm/adreno/a8xx_gpu.c
++++ w/drivers/gpu/drm/msm/adreno/a8xx_gpu.c
+@@ -122,6 +122,24 @@ void a8xx_gpu_get_slice_info(struct msm_gpu *gpu)
+ 	}
+ }
+ 
++int a8xx_get_param(struct msm_gpu *gpu, struct msm_context *ctx,
++		   u32 param, u64 *value, u32 *len)
++{
++	struct adreno_gpu *adreno_gpu = to_adreno_gpu(gpu);
++	struct a6xx_gpu *a6xx_gpu = to_a6xx_gpu(adreno_gpu);
++	int ret;
++
++	ret = adreno_get_param(gpu, ctx, param, value, len);
++	if (ret || param != MSM_PARAM_GMEM_SIZE)
++		return ret;
++
++	/* The catalog describes GMEM with all physical slices enabled. */
++	*value = (*value / adreno_gpu->info->a6xx->max_slices) *
++		hweight32(a6xx_gpu->slice_mask);
++
++	return 0;
++}
++
+ static u32 a8xx_get_first_slice(struct a6xx_gpu *a6xx_gpu)
+ {
+ 	return ffs(a6xx_gpu->slice_mask) - 1;

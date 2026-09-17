@@ -1,0 +1,89 @@
+Subject: [LOCAL BRING-UP] drm/dp: restore Surface 8 AUX brightness mode
+
+The internal panel accepts brightness writes while its control mode is PWM.
+A DMI/device-scoped read-modify-write of the mode bits made brightness
+physically respond. Preserve the existing frequency controls. The reason
+startup leaves this mode selected still needs investigation.
+
+Also propagate backlight enable/disable errors instead of recording
+success.
+No claim of suspend/resume or cold-boot validation accompanies this patch.
+
+---
+diff --git a/drivers/gpu/drm/display/drm_dp_helper.c b/drivers/gpu/drm/display/drm_dp_helper.c
+--- a/drivers/gpu/drm/display/drm_dp_helper.c
++++ b/drivers/gpu/drm/display/drm_dp_helper.c
+@@ -22,6 +22,7 @@
+ 
+ #include <linux/backlight.h>
+ #include <linux/delay.h>
++#include <linux/dmi.h>
+ #include <linux/dynamic_debug.h>
+ #include <linux/errno.h>
+ #include <linux/export.h>
+@@ -62,6 +63,7 @@
+ 	struct drm_dp_aux *aux;
+ 	struct drm_edp_backlight_info info;
+ 	bool enabled;
++	bool surface8_aux_mode;
+ };
+ 
+ /**
+@@ -4634,14 +4636,42 @@
+ 
+ 	if (!backlight_is_blank(bd)) {
+ 		if (!bl->enabled) {
+-			drm_edp_backlight_enable(bl->aux, &bl->info, brightness);
++			ret = drm_edp_backlight_enable(bl->aux, &bl->info, brightness);
++			if (ret < 0)
++				return ret;
+ 			bl->enabled = true;
+-			return 0;
++			if (!bl->surface8_aux_mode)
++				return 0;
++		}
++		/*
++		 * The Surface 8 panel was observed in PWM mode after startup,
++		 * despite accepting AUX brightness writes. Restore just the
++		 * control-mode bits; keep its working frequency settings intact.
++		 * Restrict this bring-up workaround to the tested internal panel.
++		 */
++		if (bl->surface8_aux_mode) {
++			u8 mode;
++
++			ret = drm_dp_dpcd_read_byte(bl->aux,
++					DP_EDP_BACKLIGHT_MODE_SET_REGISTER, &mode);
++			if (ret < 0)
++				return ret;
++			if ((mode & DP_EDP_BACKLIGHT_CONTROL_MODE_MASK) !=
++			    DP_EDP_BACKLIGHT_CONTROL_MODE_DPCD) {
++				mode &= ~DP_EDP_BACKLIGHT_CONTROL_MODE_MASK;
++				mode |= DP_EDP_BACKLIGHT_CONTROL_MODE_DPCD;
++				ret = drm_dp_dpcd_write_byte(bl->aux,
++						DP_EDP_BACKLIGHT_MODE_SET_REGISTER, mode);
++				if (ret < 0)
++					return ret;
++			}
+ 		}
+ 		ret = drm_edp_backlight_set_level(bl->aux, &bl->info, brightness);
+ 	} else {
+ 		if (bl->enabled) {
+-			drm_edp_backlight_disable(bl->aux, &bl->info);
++			ret = drm_edp_backlight_disable(bl->aux, &bl->info);
++			if (ret < 0)
++				return ret;
+ 			bl->enabled = false;
+ 		}
+ 	}
+@@ -4707,6 +4737,11 @@
+ 				     &current_level, &current_mode, false);
+ 	if (ret < 0)
+ 		return ret;
++
++	bl->surface8_aux_mode = bl->info.aux_set && bl->info.max == 1023 &&
++		dmi_match(DMI_PRODUCT_NAME,
++			  "Surface Laptop 13.8in 8th Ed Snapdragon") &&
++		!strcmp(dev_name(panel->dev), "aux-af6c000.displayport-controller");
+ 
+ 	props.type = BACKLIGHT_RAW;
+ 	props.brightness = current_level;

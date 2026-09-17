@@ -1,0 +1,19 @@
+--- a/drivers/soc/qcom/pmic_glink_altmode.c
++++ b/drivers/soc/qcom/pmic_glink_altmode.c
+@@ -292,9 +292,13 @@
+ 	} else if (tbt->usb_speed == 1) {
+ 		data.eudo |= FIELD_PREP(EUDO_CABLE_SPEED_MASK, EUDO_CABLE_SPEED_USB4_GEN3);
+ 	} else {
+-		pr_err("Got illegal USB4 cable speed value (%u), falling back to G2\n",
+-		       tbt->usb_speed);
+-		data.eudo |= FIELD_PREP(EUDO_CABLE_SPEED_MASK, EUDO_CABLE_SPEED_USB4_GEN2);
++		dev_err(altmode->dev, "Invalid USB4 cable speed: %u\n", tbt->usb_speed);
++		return;
++	}
++
++	if (tbt->cable_type > EUDO_CABLE_TYPE_OPTICAL) {
++		dev_err(altmode->dev, "Invalid USB4 cable type: %u\n", tbt->cable_type);
++		return;
+ 	}
+ 
+ 	data.eudo |= FIELD_PREP(EUDO_CABLE_TYPE_MASK, tbt->cable_type);

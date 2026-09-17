@@ -1,0 +1,44 @@
+--- a/arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts
++++ b/arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts
+@@ -595,8 +595,8 @@
+ };
+ 
+ &mdss_dp0 {
+-	/* USB-C alt-mode DP: needs the pmic-glink alt-mode bridges (ADSP firmware); off for bring-up so the msm device can bind with the eDP alone. */
+-	status = "disabled";
++	/* USB-C alt-mode DP through the pmic-glink alt-mode bridge; dp2 has no third USB-C PHY on this board. */
++	status = "okay";
+ };
+ 
+ &mdss_dp0_out {
+@@ -604,8 +604,8 @@
+ };
+ 
+ &mdss_dp1 {
+-	/* USB-C alt-mode DP: needs the pmic-glink alt-mode bridges (ADSP firmware); off for bring-up so the msm device can bind with the eDP alone. */
+-	status = "disabled";
++	/* USB-C alt-mode DP through the pmic-glink alt-mode bridge; dp2 has no third USB-C PHY on this board. */
++	status = "okay";
+ };
+ 
+ &mdss_dp1_out {
+@@ -907,8 +907,8 @@
+ };
+ 
+ &usb_0 {
+-	/* Host only for bring-up: the role switch needs pmic-glink via the ADSP firmware we do not have (as x1e80100-microsoft-romulus). */
+-	dr_mode = "host";
++	/* Dual role: UCSI over the SOCCP drives the role switch (USB-C tests 6-12). */
++	dr_mode = "otg";
+ 
+ 	status = "okay";
+ };
+@@ -939,7 +939,7 @@
+ };
+ 
+ &usb_1 {
+-	dr_mode = "host";
++	dr_mode = "otg";
+ 
+ 	status = "okay";
+ };

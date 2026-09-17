@@ -1,0 +1,21 @@
+--- a/drivers/thunderbolt/nhi.c
++++ b/drivers/thunderbolt/nhi.c
+@@ -1262,6 +1262,9 @@
+ 	if (!nhi->dma_dev)
+ 		nhi->dma_dev = dev;
+ 
++	/* Interrupt registration may make the handler live immediately. */
++	spin_lock_init(&nhi->lock);
++
+ 	nhi->hop_count = ioread32(nhi->iobase + REG_CAPS) & 0x3ff;
+ 	dev_dbg(dev, "total paths: %d\n", nhi->hop_count);
+ 
+@@ -1280,8 +1283,6 @@
+ 	res = nhi->ops->init_interrupts(nhi);
+ 	if (res)
+ 		return dev_err_probe(dev, res, "cannot enable interrupts, aborting\n");
+-
+-	spin_lock_init(&nhi->lock);
+ 
+ 	if (nhi->ops->init) {
+ 		res = nhi->ops->init(nhi);

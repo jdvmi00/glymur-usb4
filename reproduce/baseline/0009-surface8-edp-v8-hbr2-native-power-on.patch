@@ -1,0 +1,313 @@
+Subject: [PATCH] phy: qcom: edp: train and stream native v8 HBR2
+
+On Surface Laptop 8, the old sequence locks the PLL and recovers all four
+lane clocks but never completes lane alignment. Set up the standalone
+TX/PCS blocks before PLL start, synchronize the lanes and calibrate both
+transmitter blocks. Preserve TX LDO 0x91 and PCS LDO 0x03 during training.
+
+After video-ready and mainlink-ready, notify the standalone Glymur eDP
+PHY and switch both TX LDOs to 0xd0. The same post-training writes removed
+the visible noisy bands on the running Surface, without retraining. Do
+not use the AUX-error calibration callback for this video transition.
+
+Adapted from Bjorn Andersson's native v8 power-on proposal and Konrad
+Dybcio's HPG review (PCS LDO, training TX LDO, no CFG_1 self-test bit):
+https://lkml.iu.edu/2606.2/10010.html
+https://lkml.iu.edu/2606.2/10837.html
+
+Apply after unchanged repo 0006, 0007 and 0008 v3. Limit the PHY changes
+to native v8 eDP at 5400 Mbps, four lanes. Select divider 0x02 for Linux's
+1.35-GHz pixel parent in that path; firmware's 0x07 made the active Linux
+stream dark. The controller notification is limited to Glymur eDP.
+
+Hardware: native012 module df0e2743 on kernel 1.7 reached both DCC_DONE=3,
+TPS3 status 77 77 01 and mainlink READY at 2304x1536@120 (measured
+119.73 Hz).
+Jim confirmed clean video after the two live TX LDO writes. This patch
+reproduces that startup path on the requested 0008 v3 base and automates
+the final writes. The combined modules still need a fresh-boot hardware
+test; the new notification timing has only been checked in source tests.
+Suspend/resume, retraining and other v8 platforms remain unvalidated.
+Individual prerequisite writes have not been isolated from the working
+sequence. This is a scoped bring-up patch, not an upstream-ready claim.
+---
+diff --git a/drivers/gpu/drm/msm/dp/dp_ctrl.c b/drivers/gpu/drm/msm/dp/dp_ctrl.c
+--- a/drivers/gpu/drm/msm/dp/dp_ctrl.c
++++ b/drivers/gpu/drm/msm/dp/dp_ctrl.c
+@@ -10,6 +10,7 @@
+ #include <linux/completion.h>
+ #include <linux/delay.h>
+ #include <linux/iopoll.h>
++#include <linux/of.h>
+ #include <linux/phy/phy.h>
+ #include <linux/phy/phy-dp.h>
+ #include <linux/pm_opp.h>
+@@ -2638,6 +2639,13 @@
+ 	drm_dbg_dp(ctrl->drm_dev,
+ 		"mainlink %s\n", mainlink_ready ? "READY" : "NOT READY");
+ 
++	/* The standalone v8 eDP PHY uses a separate LDO setting for video. */
++	if (mainlink_ready &&
++	    panel->connector->connector_type == DRM_MODE_CONNECTOR_eDP &&
++	    of_device_is_compatible(ctrl->phy->dev.parent->of_node,
++				    "qcom,glymur-dp-phy"))
++		ret = phy_notify_connect(ctrl->phy, 0);
++
+ 	return ret;
+ }
+ 
+diff --git a/drivers/phy/qualcomm/phy-qcom-edp.c b/drivers/phy/qualcomm/phy-qcom-edp.c
+--- a/drivers/phy/qualcomm/phy-qcom-edp.c
++++ b/drivers/phy/qualcomm/phy-qcom-edp.c
+@@ -72,6 +72,33 @@
+ #define TXn_LANE_MODE_1                         0x0064
+ 
+ #define TXn_TRAN_DRVR_EMP_EN                    0x0078
++
++/* Standalone v8 PCS and TX registers (not the combo TX map). */
++#define DP_PHY_V8_TSYNC_OVRD                    0x0078
++#define DP_PHY_V8_TX2_TX3_LANE_CTL              0x00c0
++#define DP_PHY_V8_AUXLESS_CFG1                  0x00cc
++#define DP_PHY_V8_LFPS_PERIOD                   0x00d4
++#define DP_PHY_V8_LFPS_CYC                      0x00d8
++#define DP_PHY_V8_AUXLESS_SETUP_CYC             0x00dc
++#define DP_PHY_V8_AUXLESS_SILENCE_CYC           0x00e0
++#define DP_PHY_V8_LN0_DRV_LVL                   0x00e4
++#define DP_PHY_V8_LN1_DRV_LVL                   0x00e8
++#define DP_PHY_V8_LDO_CFG                       0x00f0
++#define DP_PHY_V8_STATUS                        0x0110
++#define TXn_TX_IDLE_LVL_LARGE_AMP               0x0010
++#define TXn_PRE_EMPH                            0x0020
++#define TXn_INTERFACE_SELECT                    0x0024
++#define TXn_SLEW_CNTL                           0x002c
++#define TXn_LPB_CFG1                            0x0034
++#define TXn_RES_CODE_LANE_TX                    0x003c
++#define TXn_RES_CODE_LANE_TX1                   0x0040
++#define TXn_SERDES_BYP_EN_OUT                   0x004c
++#define TXn_PARRATE_REC_DETECT_IDLE_EN          0x0060
++#define TXn_LANE_MODE_2                         0x0068
++#define TXn_VMODE_CTRL1                         0x007c
++#define TXn_DCC0_CTRL                           0x00c8
++#define TXn_DCC1_CTRL                           0x00d0
++#define TXn_DCC_DONE                            0x00e0
+ 
+ struct qcom_edp_swing_pre_emph_cfg {
+ 	const u8 (*swing_hbr_rbr)[4][4];
+@@ -1134,6 +1161,168 @@
+ 				     val, val & BIT(7), 5, 200);
+ }
+ 
++/* This sequence is validated for native eDP, HBR2, four lanes. */
++static bool qcom_edp_hbr2_mode(const struct qcom_edp *edp)
++{
++	return edp->is_edp && edp->dp_opts.link_rate == 5400 &&
++	       edp->dp_opts.lanes == 4;
++}
++
++static int qcom_edp_ldo_config_hbr2(const struct qcom_edp *edp)
++{
++	if (!qcom_edp_hbr2_mode(edp))
++		return qcom_edp_ldo_config_v6(edp);
++
++	/* HPG review: 0x91 at the TX, plus the separate PCS LDO enable. */
++	writel(0x91, edp->tx0 + TXn_LDO_CONFIG);
++	writel(0x91, edp->tx1 + TXn_LDO_CONFIG);
++	writel(0x03, edp->edp + DP_PHY_V8_LDO_CFG);
++	return 0;
++}
++
++static void qcom_edp_hbr2_dcc_control(const struct qcom_edp *edp, u32 value)
++{
++	writel(value, edp->tx0 + TXn_DCC0_CTRL);
++	writel(value, edp->tx0 + TXn_DCC1_CTRL);
++	writel(value, edp->tx1 + TXn_DCC0_CTRL);
++	writel(value, edp->tx1 + TXn_DCC1_CTRL);
++}
++
++static void qcom_edp_hbr2_tx_prepare(void __iomem *tx)
++{
++	writel(0x12, tx + TXn_TX_DRV_LVL);
++	writel(0x0f, tx + TXn_CLKBUF_ENABLE);
++	writel(0x00, tx + TXn_PRE_EMPH);
++	writel(0x00, tx + TXn_VMODE_CTRL1);
++	writel(0x00, tx + TXn_SERDES_BYP_EN_OUT);
++	writel(0x03, tx + TXn_LPB_CFG1);
++	writel(0x10, tx + TXn_TX_DRV_LVL_OFFSET);
++	writel(0x05, tx + TXn_INTERFACE_SELECT);
++	writel(0x01, tx + TXn_TRAN_DRVR_EMP_EN);
++	writel(0x06, tx + TXn_TX_EMP_POST1_LVL);
++	writel(0x00, tx + TXn_LANE_MODE_1);
++	writel(0x00, tx + TXn_LANE_MODE_2);
++	writel(0x12, tx + TXn_TX_DRV_LVL);
++	writel(0x00, tx + TXn_PARRATE_REC_DETECT_IDLE_EN);
++	writel(0x00, tx + TXn_TX_IDLE_LVL_LARGE_AMP);
++	writel(0x03, tx + TXn_RESET_TSYNC_EN);
++	writel(0x04, tx + TXn_TX_BAND);
++	writel(0x00, tx + TXn_SLEW_CNTL);
++	writel(0x60, tx + TXn_RES_CODE_LANE_TX);
++	writel(0x60, tx + TXn_RES_CODE_LANE_TX1);
++	/* Retain the Surface-specific settings from 0008, before PLL start. */
++	writel(0x06, tx + TXn_RES_CODE_LANE_OFFSET_TX0);
++	writel(0x06, tx + TXn_RES_CODE_LANE_OFFSET_TX1);
++	writel(0x44, tx + 0x88);
++	writel(0x01, tx + 0x90);
++}
++
++static void qcom_edp_hbr2_lane_enable(void __iomem *tx)
++{
++	writel(0x1f, tx + TXn_HIGHZ_DRVR_EN);
++	writel(0x03, tx + TXn_TRANSCEIVER_BIAS_EN);
++	writel(0x04, tx + TXn_HIGHZ_DRVR_EN);
++	writel(0x00, tx + TXn_TX_POL_INV);
++}
++
++static int qcom_edp_hbr2_finish(const struct qcom_edp *edp)
++{
++	u32 val;
++	int ret;
++
++	writel(0x0f, edp->tx0 + TXn_RESET_TSYNC_EN);
++	writel(0x0f, edp->tx1 + TXn_RESET_TSYNC_EN);
++	writel(0x03, edp->edp + DP_PHY_V8_TSYNC_OVRD);
++	writel(0x23, edp->edp + DP_PHY_V8_TSYNC_OVRD);
++	writel(0x22, edp->edp + DP_PHY_V8_TSYNC_OVRD);
++	writel(0x0a, edp->tx0 + TXn_RESET_TSYNC_EN);
++	writel(0x0a, edp->tx1 + TXn_RESET_TSYNC_EN);
++	writel(0x3e, edp->edp + DP_PHY_V8_TSYNC_OVRD);
++	writel(0x08, edp->edp + DP_PHY_CFG);
++	usleep_range(100, 1000);
++	writel(0x09, edp->edp + DP_PHY_CFG);
++	ret = readl_poll_timeout(edp->edp + DP_PHY_V8_STATUS,
++				 val, val & BIT(1), 500, 10000);
++	dev_info(edp->dev, "hbr2-native: PHY ready ret=%d status=%#x\n", ret, val);
++	if (ret)
++		return ret;
++
++	qcom_edp_hbr2_dcc_control(edp, 0x07);
++	ret = readl_poll_timeout(edp->tx0 + TXn_DCC_DONE,
++				 val, (val & 0x03) == 0x03, 500, 10000);
++	if (!ret)
++		ret = readl_poll_timeout(edp->tx1 + TXn_DCC_DONE,
++					 val, (val & 0x03) == 0x03, 500, 10000);
++	dev_info(edp->dev, "hbr2-native: DCC ret=%d tx0=%#x tx1=%#x\n", ret,
++		 readl(edp->tx0 + TXn_DCC_DONE), readl(edp->tx1 + TXn_DCC_DONE));
++	qcom_edp_hbr2_dcc_control(edp, 0x06);
++	return ret;
++}
++
++static int qcom_edp_power_on_hbr2(const struct qcom_edp *edp)
++{
++	unsigned long pixel_freq;
++	int ret;
++
++	qcom_edp_hbr2_dcc_control(edp, 0x06);
++	ret = edp->cfg->ver_ops->com_power_on(edp);
++	if (ret)
++		return ret;
++	qcom_edp_ldo_config_hbr2(edp);
++
++	/* AUX-less timing before the PLL setup, without the BIST bit 5. */
++	writel(0x00, edp->tx0 + TXn_LANE_MODE_1);
++	writel(0x00, edp->tx1 + TXn_LANE_MODE_1);
++	writel(0x0f, edp->edp + DP_PHY_CFG_1);
++	writel(0x00, edp->edp + DP_PHY_V8_AUXLESS_CFG1);
++	writel(0x09, edp->edp + DP_PHY_V8_AUXLESS_SETUP_CYC);
++	writel(0x11, edp->edp + DP_PHY_V8_AUXLESS_SILENCE_CYC);
++	writel(0x08, edp->edp + DP_PHY_V8_LFPS_CYC);
++	writel(0x33, edp->edp + DP_PHY_V8_LFPS_PERIOD);
++	writel(0x0f, edp->edp + DP_PHY_CFG_1);
++
++	if (edp->dp_opts.ssc && !no_ssc) {
++		ret = qcom_edp_configure_ssc(edp);
++		if (ret)
++			return ret;
++	}
++	ret = qcom_edp_configure_pll(edp);
++	if (ret)
++		return ret;
++	writel(lock_cmp_en >= 0 ? lock_cmp_en : 0x08,
++	       edp->pll + DP_QSERDES_V8_COM_LOCK_CMP_EN);
++
++	writel(0x05, edp->edp + DP_PHY_TX0_TX1_LANE_CTL);
++	writel(0x05, edp->edp + DP_PHY_V8_TX2_TX3_LANE_CTL);
++	writel(0x12, edp->edp + DP_PHY_V8_LN0_DRV_LVL);
++	writel(0x12, edp->edp + DP_PHY_V8_LN1_DRV_LVL);
++	qcom_edp_hbr2_tx_prepare(edp->tx0);
++	qcom_edp_hbr2_tx_prepare(edp->tx1);
++	/* Linux uses a 1.35-GHz pixel-clock parent; firmware's 0x07 is unsuitable. */
++	pixel_freq = 5400000000UL / 4;
++	writel(0x02, edp->edp + DP_PHY_VCO_DIV);
++	writel(0x13, edp->edp + DP_PHY_AUX_CFG(1));
++	writel(0xa4, edp->edp + DP_PHY_AUX_CFG(2));
++
++	writel(0x01, edp->edp + DP_PHY_CFG);
++	writel(0x05, edp->edp + DP_PHY_CFG);
++	writel(0x01, edp->edp + DP_PHY_CFG);
++	writel(0x09, edp->edp + DP_PHY_CFG);
++	ret = edp->cfg->ver_ops->com_resetsm_cntrl(edp);
++	if (ret)
++		return ret;
++	writel(0x19, edp->edp + DP_PHY_CFG);
++	qcom_edp_hbr2_lane_enable(edp->tx0);
++	qcom_edp_hbr2_lane_enable(edp->tx1);
++	ret = qcom_edp_hbr2_finish(edp);
++	if (ret)
++		return ret;
++	dev_info(edp->dev, "hbr2-native: power-on complete, four lanes at 5400\n");
++	clk_set_rate(edp->dp_link_hw.clk, edp->dp_opts.link_rate * 100000);
++	clk_set_rate(edp->dp_pixel_hw.clk, pixel_freq);
++	return 0;
++}
++
+ static const struct phy_ver_ops qcom_edp_phy_ops_v8 = {
+ 	.com_power_on		= qcom_edp_phy_power_on_v8,
+ 	.com_resetsm_cntrl	= qcom_edp_phy_com_resetsm_cntrl_v8,
+@@ -1141,7 +1330,7 @@
+ 	.com_clk_fwd_cfg	= qcom_edp_com_clk_fwd_cfg_v8,
+ 	.com_configure_pll	= qcom_edp_com_configure_pll_v8,
+ 	.com_configure_ssc	= qcom_edp_com_configure_ssc_v8,
+-	.com_ldo_config		= qcom_edp_ldo_config_v6,
++	.com_ldo_config		= qcom_edp_ldo_config_hbr2,
+ };
+ 
+ static struct qcom_edp_phy_cfg glymur_phy_cfg = {
+@@ -1160,6 +1349,9 @@
+ 	int ret;
+ 	u32 val;
+ 	u8 cfg1;
++
++	if (edp->cfg->ver_ops == &qcom_edp_phy_ops_v8 && qcom_edp_hbr2_mode(edp))
++		return qcom_edp_power_on_hbr2(edp);
+ 
+ 	ret = edp->cfg->ver_ops->com_power_on(edp);
+ 	if (ret)
+@@ -1305,6 +1497,21 @@
+ 	return 0;
+ }
+ 
++static int qcom_edp_phy_connect(struct phy *phy, int port)
++{
++	const struct qcom_edp *edp = phy_get_drvdata(phy);
++
++	if (port || edp->cfg->ver_ops != &qcom_edp_phy_ops_v8 ||
++	    !qcom_edp_hbr2_mode(edp))
++		return 0;
++
++	/* Keep 0x91 through training; select the video setting once ready. */
++	writel(0xd0, edp->tx0 + TXn_LDO_CONFIG);
++	writel(0xd0, edp->tx1 + TXn_LDO_CONFIG);
++
++	return 0;
++}
++
+ static int qcom_edp_phy_power_off(struct phy *phy)
+ {
+ 	const struct qcom_edp *edp = phy_get_drvdata(phy);
+@@ -1341,6 +1548,7 @@
+ 	.configure	= qcom_edp_phy_configure,
+ 	.power_on	= qcom_edp_phy_power_on,
+ 	.power_off	= qcom_edp_phy_power_off,
++	.connect	= qcom_edp_phy_connect,
+ 	.set_mode	= qcom_edp_phy_set_mode,
+ 	.exit		= qcom_edp_phy_exit,
+ 	.owner		= THIS_MODULE,

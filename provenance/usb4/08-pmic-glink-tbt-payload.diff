@@ -1,0 +1,59 @@
+--- a/drivers/soc/qcom/pmic_glink_altmode.c
++++ b/drivers/soc/qcom/pmic_glink_altmode.c
+@@ -211,8 +211,24 @@
+ {
+ 	struct usbc_sc8280x_tbt_data *tbt = &port->tbt_data;
+ 	struct typec_thunderbolt_data tbt_data = {};
+-	u32 cable_speed;
++	u32 cable_speed, cable_flags = 0;
+ 	int ret;
++
++	/* PAN cable types use the same encoding as Enter_USB. */
++	switch (tbt->cable_type) {
++	case EUDO_CABLE_TYPE_PASSIVE:
++	case EUDO_CABLE_TYPE_RE_DRIVER:
++		break;
++	case EUDO_CABLE_TYPE_RE_TIMER:
++		cable_flags = TBT_CABLE_RETIMER;
++		break;
++	case EUDO_CABLE_TYPE_OPTICAL:
++		cable_flags = TBT_CABLE_OPTICAL;
++		break;
++	default:
++		dev_err(altmode->dev, "Invalid TBT3 cable type: %u\n", tbt->cable_type);
++		return;
++	}
+ 
+ 	/* Device Discover Mode VDO */
+ 	tbt_data.device_mode = TBT_MODE;
+@@ -226,15 +242,13 @@
+ 	} else if (tbt->usb_speed == 1) {
+ 		cable_speed = TBT_CABLE_10_AND_20GBPS;
+ 	} else {
+-		dev_err(altmode->dev,
+-			"Got illegal TBT3 cable speed value (%u), falling back to passive\n",
+-			tbt->usb_speed);
+-		cable_speed = TBT_CABLE_USB3_PASSIVE;
++		dev_err(altmode->dev, "Invalid TBT3 cable speed: %u\n", tbt->usb_speed);
++		return;
+ 	}
+ 	tbt_data.cable_mode |= TBT_SET_CABLE_SPEED(cable_speed);
+ 
+-	if (tbt->cable_type) {
+-		tbt_data.cable_mode |= TBT_CABLE_ACTIVE_PASSIVE;
++	if (tbt->cable_type != EUDO_CABLE_TYPE_PASSIVE) {
++		tbt_data.cable_mode |= TBT_CABLE_ACTIVE_PASSIVE | cable_flags;
+ 		tbt_data.cable_mode |= TBT_SET_CABLE_ROUNDED(tbt->rounded_cable);
+ 	}
+ 
+@@ -242,8 +256,8 @@
+ 	tbt_data.enter_vdo |= TBT_MODE;
+ 	tbt_data.enter_vdo |= TBT_ENTER_MODE_CABLE_SPEED(cable_speed);
+ 
+-	if (tbt->cable_type) {
+-		tbt_data.enter_vdo |= TBT_CABLE_ACTIVE_PASSIVE;
++	if (tbt->cable_type != EUDO_CABLE_TYPE_PASSIVE) {
++		tbt_data.enter_vdo |= TBT_ENTER_MODE_ACTIVE_CABLE | cable_flags;
+ 		tbt_data.enter_vdo |= TBT_SET_CABLE_ROUNDED(tbt->rounded_cable);
+ 	}
+ 

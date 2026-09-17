@@ -1,0 +1,1005 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Microsoft Surface Laptop 8 (13.8in, Snapdragon X2 Elite / Glymur).
+ *
+ * First bring-up draft, September 2026. Derived from the Asus Zenbook A16
+ * (UX3607OA) tree for the SoC wiring and from the Surface Laptop 7 (romulus)
+ * tree for the Surface-specific parts. Bus and pin assignments below come
+ * from the machine's own ACPI tables (see surface-laptop-8/evidence); items
+ * marked TODO are carried over from the Zenbook unverified.
+ *
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ */
+/dts-v1/;
+
+#include "mahua.dtsi"
+
+#include "pmcx0102.dtsi"
+#include "pmh0101.dtsi"
+#include "pmh0110-glymur.dtsi"
+#include "pmk8850.dtsi"
+#include "smb2370.dtsi"
+
+#include <dt-bindings/input/gpio-keys.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+
+/*
+ * First boot on the Surface Laptop 8 (2026-09-10): SPMI0 slave ids 3, 8 and 9
+ * answer with transaction failures, so this board has no second pmcx0102 die
+ * and no pmh0104; and the firmware knows only 12 CPUs (PSCI refuses 12-17).
+ * RPMh also has no L6B_E0 or L1C_E0 resources here.
+ *
+ * Revision 3 (second boot, same day): RPMh knows none of the C_E0 rails
+ * (L2C_E0 failed next), so the whole set is gone. The firmware's own power
+ * tables (evidence/2026-09-10-firmware-dump/pep-power-tables.txt) vote the
+ * pmh0110 H_E0 rails for USB, PCIe 5 and the display instead, exactly as the
+ * Qualcomm reference design (glymur-crd) wires them, so the supplies below
+ * follow the CRD rather than the Zenbook. The same tables confirm the panel
+ * pins: TLMM 70 (3.3 V enable), 18 (panel enable), 119 (eDP hot-plug), and
+ * L8B_E0 at 3.3 V for the panel.
+ *
+ * Revision 4: the 12-core X2 Elite is upstream as "Mahua" (mahua.dtsi, a
+ * Glymur derivative with the third CPU cluster, tsens6/tsens7, cti_wpss,
+ * bwmon_cluster2 and the cluster-2 thermal zones removed, and Mahua
+ * interconnect/TLMM/TCSR compatibles). Revision 3 still described those
+ * blocks on top of glymur.dtsi; the tsens driver probes them right after the
+ * regulators register, which is where every boot died. The PMIC deletions
+ * and the TCSR reference supplies follow mahua-crd.dts. TLMM 90 is the SAM
+ * UART TX on this board, not a TPM pin, so it is no longer reserved; i2c9
+ * and i2c13 have no firmware evidence and stay disabled.
+ *
+ * Revision 5: the firmware drives exactly one PMIC GPIO (PMIC0 GPIO 4, for
+ * the display) and never touches TLMM 94, so the Zenbook's GPIO-switched
+ * supplies (misc 3.3 V on pmh0110 F_E0 GPIO 6, NVMe on pmh0101 GPIO 14,
+ * WCN 3.3 V on TLMM 94) are dropped: Linux drove those pins high the moment
+ * the PMIC GPIO chips registered, which is when the panel went dark.
+ *
+ * Revision 6: both USB-C controllers run host-only. The SoC file leaves the
+ * role to usb-role-switch, which pmic-glink drives over the ADSP; without the
+ * Microsoft-signed ADSP firmware that never happens and the ports never start
+ * as hosts (the first logged boot with the M31 PHY driver still saw no stick).
+ *
+ * Installation readiness (2026-09-12): enable PCIe 5 and its PHY after SSD
+ * read-only tests passed across initial boot, restart and cold start. Wi-Fi
+ * stays disabled. Display/USB wiring and the Mahua base are unchanged.
+ *
+ * Revision 7: pcie4/pcie5 (Wi-Fi, NVMe) disabled for bring-up. The panel goes
+ * dark the moment USB/PCIe probe (their first votes replace the firmware's
+ * fabric/power settings); PCIe is not needed to boot the live stick, so it is
+ * out until the display driver owns the panel.
+ *
+ * Revision 8: the multiport USB controller (USB-A port) with its two PTN3222
+ * eUSB2 repeaters on i2c5, as the firmware's USB3 device describes and as the
+ * reference design wires it. The USB-A port needs no Type-C role/VBUS
+ * negotiation, which the Type-C ports cannot get without the ADSP firmware.
+ *
+ * Revision 9: repeaters left to the firmware (see the i2c5 note below).
+ *
+ * Revision 10: ramoops region for a persistent console log (bring-up only).
+ *
+ * Revision 11: no consumer depends on the H_E0 set any more. It was assumed
+ * from the firmware power tables, but so were the C_E0 rails that RPMh does
+ * not know; if H_E0 is missing too, every USB PHY and the TCSR clock block
+ * (USB and eDP reference-clock enables) wait on it forever, which matches
+ * the dead USB and the dark panel. USB and TCSR supplies now come from the
+ * F_E0/F_E1 rails that were seen to register, at the voltages the firmware
+ * votes (L4F_E1 1.2 V, L2F_E1 0.88 V, L2F_E0 0.936 V). The H_E0 node stays
+ * as a diagnostic: if it fails, only it fails.
+ *
+ * Revision 12: ramoops moved to 0x900000000 (see reserved-memory).
+ *
+ * Revision 13: the firmware framebuffer is reserved (see reserved-memory);
+ * the first full boot log showed the live system up with USB, touchpad and
+ * touchscreen working while the panel went black from memory reuse.
+ *
+ * Revision 14: romulus13 fallback compatible for the Surface Aggregator
+ * registry (see the root node).
+ *
+ * Revision 15: the first msm boot read the panel's EDID (SHP 0x1572) but the
+ * device never bound: dp2 failed to probe (-ENOENT) and dp0/dp1 waited on the
+ * alt-mode bridges. All three external DP paths are disabled; only the eDP
+ * (dp3) stays.
+ *
+ * Revision 16: eDP limited to two lanes / HBR2 (see mdss_dp3_out): with the
+ * msm device bound, link training failed in channel equalisation.
+ *
+ * Revision 17: four lanes again, link rate capped at 2.7 GHz (see
+ * mdss_dp3_out for why 4.32 Gbps was being selected and failing).
+ */
+/* As mahua-crd.dts: one pmcx0102 die on SPMI0. */
+/delete-node/ &pmcx0102_d_e0;
+/delete-node/ &pmcx0102_d0_thermal;
+
+/ {
+	/*
+	 * "microsoft,romulus13" (Surface Laptop 7) is a bring-up fallback: the
+	 * Surface Aggregator registry instantiates its keyboard/battery/etc. devices
+	 * by matching the root compatible, and it has no Laptop 8 entry yet.
+	 */
+	compatible = "microsoft,surface-laptop8", "microsoft,romulus13", "qcom,mahua";
+	model = "Microsoft Surface Laptop 8 (13.8in, Snapdragon X2 Elite)";
+
+	aliases {
+		i2c8 = &i2c8;
+		i2c9 = &i2c9;
+		i2c10 = &i2c10;
+		i2c13 = &i2c13;
+
+		serial0 = &uart21;
+		serial1 = &uart14;
+	};
+
+	chosen {
+	};
+
+	clocks {
+		sleep_clk: sleep-clk {
+			compatible = "fixed-clock";
+			clock-frequency = <32000>;
+			#clock-cells = <0>;
+		};
+
+		xo_board: xo-board {
+			compatible = "fixed-clock";
+			clock-frequency = <38400000>;
+			#clock-cells = <0>;
+		};
+	};
+
+	pmic-glink {
+		compatible = "qcom,glymur-pmic-glink",
+			     "qcom,pmic-glink";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/* Left side display-adjacent port */
+		connector@0 {
+			compatible = "usb-c-connector";
+			reg = <0>;
+			power-role = "dual";
+			data-role = "dual";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					pmic_glink_hs_in: endpoint {
+						remote-endpoint = <&usb_0_dwc3_hs>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+
+					pmic_glink_ss_in: endpoint {
+						remote-endpoint = <&usb_0_qmpphy_out>;
+					};
+				};
+			};
+		};
+
+		/* Left side user-adjacent port */
+		connector@1 {
+			compatible = "usb-c-connector";
+			reg = <1>;
+			power-role = "dual";
+			data-role = "dual";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					pmic_glink_hs_in1: endpoint {
+						remote-endpoint = <&usb_1_dwc3_hs>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+
+					pmic_glink_ss_in1: endpoint {
+						remote-endpoint = <&usb_1_qmpphy_out>;
+					};
+				};
+			};
+		};
+	};
+
+	vreg_edp: regulator-edp {
+		compatible = "regulator-fixed";
+
+		regulator-name = "VREG_EDP_3P3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+
+		gpio = <&tlmm 70 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+
+		vin-supply = <&vreg_l8b_e0>;
+
+		pinctrl-0 = <&edp_pwr_en>;
+		pinctrl-names = "default";
+
+		regulator-boot-on;
+	};
+
+	reserved-memory {
+		linux,cma {
+			compatible = "shared-dma-pool";
+			size = <0x0 0x10000000>;
+			reusable;
+			linux,cma-default;
+		};
+
+		/*
+		 * Bring-up only: persistent kernel log (pstore/ramoops) that survives a
+		 * warm reset, read back by the next boot. The kernel's memory map on
+		 * this unit: ~2 GB of fragmented RAM below 4 GB, nothing between 4 GB
+		 * and 0x880000000, then 0x880000000-0xbffffffff. Revision 10 put this
+		 * at 0x180000000, which is not RAM here, and the first write reset the
+		 * SoC; 0x900000000 is well inside the upper window.
+		 */
+		/*
+		 * The firmware's framebuffer (GOP, 2304x1536x32 at 0xf9a20000, 13824 KiB)
+		 * lies inside a range the UEFI memory map hands to Linux as ordinary
+		 * RAM (node range 0xf9a20000-0xfbd1ffff). Without this reservation the
+		 * kernel reuses it as soon as the boot allocates memory in earnest and
+		 * the panel goes black. Keep it until the display driver owns the panel.
+		 */
+		framebuffer@f9a20000 {
+			reg = <0x0 0xf9a20000 0x0 0xd80000>;
+			no-map;
+		};
+
+		ramoops@900000000 {
+			compatible = "ramoops";
+			reg = <0x9 0x00000000 0x0 0x200000>;
+			record-size = <0x20000>;
+			console-size = <0x100000>;
+			ecc-size = <0>;
+		};
+	};
+
+	wlan-connector {
+		compatible = "pcie-m2-e-connector";
+		vpcie1v8-supply = <&vreg_l15b_e0>;
+
+		w-disable1-gpios = <&tlmm 117 GPIO_ACTIVE_LOW>;
+		w-disable2-gpios = <&tlmm 116 GPIO_ACTIVE_LOW>;
+
+		pinctrl-0 = <&wcn_wlan_bt_en>;
+		pinctrl-names = "default";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				m2_e_pcie_ep: endpoint@0 {
+					reg = <0>;
+					remote-endpoint = <&pcie4_port0_ep>;
+				};
+			};
+
+			port@3 {
+				reg = <3>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				m2_e_uart_ep: endpoint@0 {
+					reg = <0>;
+					remote-endpoint = <&uart14_ep>;
+				};
+			};
+		};
+	};
+};
+
+&apps_rsc {
+	/* PMH0101 */
+	regulators-0 {
+		compatible = "qcom,pmh0101-rpmh-regulators";
+		qcom,pmic-id = "B_E0";
+
+		vreg_l1b_e0: ldo1 {
+			regulator-name = "vreg_l1b_e0";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		/* Unused */
+		vreg_l2b_e0: ldo2 {
+			regulator-name = "vreg_l2b_e0";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+
+		vreg_l7b_e0: ldo7 {
+			regulator-name = "vreg_l7b_e0";
+			regulator-min-microvolt = <3072000>;
+			regulator-max-microvolt = <3072000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l8b_e0: ldo8 {
+			regulator-name = "vreg_l8b_e0";
+			regulator-min-microvolt = <3072000>;
+			regulator-max-microvolt = <3304000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		/* Unused */
+		vreg_l9b_e0: ldo9 {
+			regulator-name = "vreg_l9b_e0";
+			regulator-min-microvolt = <2960000>;
+			regulator-max-microvolt = <2960000>;
+		};
+
+		vreg_l10b_e0: ldo10 {
+			regulator-name = "vreg_l10b_e0";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l11b_e0: ldo11 {
+			regulator-name = "vreg_l11b_e0";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		/* Unused */
+		vreg_l12b_e0: ldo12 {
+			regulator-name = "vreg_l12b_e0";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+		};
+
+		vreg_l15b_e0: ldo15 {
+			regulator-name = "vreg_l15b_e0";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			/* Provides reference voltage for many undescribed components */
+			regulator-always-on;
+		};
+
+		/* Unused */
+		vreg_l17b_e0: ldo17 {
+			regulator-name = "vreg_l17b_e0";
+			regulator-min-microvolt = <2504000>;
+			regulator-max-microvolt = <2504000>;
+		};
+
+		vreg_l18b_e0: ldo18 {
+			regulator-name = "vreg_l18b_e0";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+
+			/* Provides reference voltage for many undescribed components */
+			regulator-always-on;
+		};
+	};
+
+	/* PMH0110 H_E0: USB PHY, PCIe 5 PHY and reference rails (firmware power tables) */
+	regulators-1 {
+		compatible = "qcom,pmh0110-rpmh-regulators";
+		qcom,pmic-id = "H_E0";
+
+		vreg_l1h_e0: ldo1 {
+			regulator-name = "vreg_l1h_e0";
+			regulator-min-microvolt = <936000>;
+			regulator-max-microvolt = <936000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l2h_e0: ldo2 {
+			regulator-name = "vreg_l2h_e0";
+			regulator-min-microvolt = <880000>;
+			regulator-max-microvolt = <880000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l4h_e0: ldo4 {
+			regulator-name = "vreg_l4h_e0";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+
+	/* PMH0110 */
+	regulators-2 {
+		compatible = "qcom,pmh0110-rpmh-regulators";
+		qcom,pmic-id = "F_E0";
+
+		vreg_s7f_e0: smps7 {
+			regulator-name = "vreg_s7f_e0";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_s8f_e0: smps8 {
+			regulator-name = "vreg_s8f_e0";
+			regulator-min-microvolt = <952000>;
+			regulator-max-microvolt = <952000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l2f_e0: ldo2 {
+			regulator-name = "vreg_l2f_e0";
+			regulator-min-microvolt = <936000>;
+			regulator-max-microvolt = <936000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l3f_e0: ldo3 {
+			regulator-name = "vreg_l3f_e0";
+			regulator-min-microvolt = <912000>;
+			regulator-max-microvolt = <912000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+
+	regulators-3 {
+		compatible = "qcom,pmcx0102-rpmh-regulators";
+		qcom,pmic-id = "C_E1";
+
+		vreg_l1c_e1: ldo1 {
+			regulator-name = "vreg_l1c_e1";
+			regulator-min-microvolt = <912000>;
+			regulator-max-microvolt = <912000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l2c_e1: ldo2 {
+			regulator-name = "vreg_l2c_e1";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l3c_e1: ldo3 {
+			regulator-name = "vreg_l3c_e1";
+			regulator-min-microvolt = <936000>;
+			regulator-max-microvolt = <936000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l4c_e1: ldo4 {
+			regulator-name = "vreg_l4c_e1";
+			regulator-min-microvolt = <912000>;
+			regulator-max-microvolt = <912000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+
+	/* PMH0110 */
+	regulators-4 {
+		compatible = "qcom,pmh0110-rpmh-regulators";
+		qcom,pmic-id = "F_E1";
+
+		vreg_l1f_e1: ldo1 {
+			regulator-name = "vreg_l1f_e1";
+			regulator-min-microvolt = <904000>;
+			regulator-max-microvolt = <904000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l2f_e1: ldo2 {
+			regulator-name = "vreg_l2f_e1";
+			regulator-min-microvolt = <880000>;
+			regulator-max-microvolt = <880000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l4f_e1: ldo4 {
+			regulator-name = "vreg_l4f_e1";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+};
+
+&gpu {
+	status = "okay";
+};
+
+&gmu {
+	status = "okay";
+};
+
+/*
+ * ACPI I2C6 (0xb94000) carries the multiport controller's two eUSB2 repeaters
+ * (0x43 and 0x4f). Their enable pins, TLMM 8 and 184, are driven high by the
+ * firmware's power-on routine for that controller; the Linux PTN3222 driver
+ * would hold them in reset until the USB controller initialises, which cut the
+ * USB-A port's power on the first attempt. The repeaters are therefore left as
+ * the firmware configured them and are not described here.
+ */
+&i2c8 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	/* ACPI MSHW0776, "Surface Touch Screen Device" */
+	touchscreen@41 {
+		compatible = "hid-over-i2c";
+		reg = <0x41>;
+		hid-descr-addr = <0x1>;
+		interrupts-extended = <&tlmm 43 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-0 = <&ts_default>;
+		pinctrl-names = "default";
+		wakeup-source;
+	};
+
+	/* ACPI MSHW0774, second touch/digitizer HID function */
+	digitizer@34 {
+		compatible = "hid-over-i2c";
+		reg = <0x34>;
+		hid-descr-addr = <0x1>;
+		interrupts-extended = <&tlmm 51 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-0 = <&digitizer_default>;
+		pinctrl-names = "default";
+	};
+};
+
+&i2c10 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	/*
+	 * ACPI MSHW0756, "Surface Touchpad Device". TODO: the firmware reports
+	 * its interrupt as PDC-style pin 896, not yet mapped to a TLMM GPIO;
+	 * GPIO 3 is the reference-design touchpad interrupt and is a guess.
+	 */
+	touchpad@15 {
+		compatible = "hid-over-i2c";
+		reg = <0x15>;
+		hid-descr-addr = <0x1>;
+		interrupts-extended = <&tlmm 3 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-0 = <&tpad_default>;
+		pinctrl-names = "default";
+		wakeup-source;
+	};
+};
+
+&lpass_vamacro {
+	vdd-micb-supply = <&vreg_l1b_e0>;
+
+	pinctrl-0 = <&dmic01_default>;
+	pinctrl-names = "default";
+
+	qcom,dmic-sample-rate = <4800000>;
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_dp0 {
+	/* USB-C alt-mode DP: needs the pmic-glink alt-mode bridges (ADSP firmware); off for bring-up so the msm device can bind with the eDP alone. */
+	status = "disabled";
+};
+
+&mdss_dp0_out {
+	link-frequencies = /bits/ 64 <1620000000 2700000000 5400000000 8100000000>;
+};
+
+&mdss_dp1 {
+	/* USB-C alt-mode DP: needs the pmic-glink alt-mode bridges (ADSP firmware); off for bring-up so the msm device can bind with the eDP alone. */
+	status = "disabled";
+};
+
+&mdss_dp1_out {
+	link-frequencies = /bits/ 64 <1620000000 2700000000 5400000000 8100000000>;
+};
+
+&mdss_dp2 {
+	/* USB-C alt-mode DP: needs the pmic-glink alt-mode bridges (ADSP firmware); off for bring-up so the msm device can bind with the eDP alone. */
+	status = "disabled";
+};
+
+&mdss_dp2_out {
+	link-frequencies = /bits/ 64 <1620000000 2700000000 5400000000 8100000000>;
+};
+
+&mdss_dp3 {
+	/delete-property/ #sound-dai-cells;
+
+	pinctrl-0 = <&edp0_hpd_default>;
+	pinctrl-names = "default";
+
+	status = "okay";
+
+	aux-bus {
+		panel {
+			/*
+			 * Sharp SHP1572 eDP (Windows DISPLAY\SHP1572). Firmware panel
+			 * config: generic eDP, PMIC PWM backlight (12-bit). The enable
+			 * (TLMM 18), power (TLMM 70) and hot-plug (TLMM 119) pins are the
+			 * ones the firmware power tables switch for the display.
+			 */
+			compatible = "edp-panel";
+			enable-gpios = <&tlmm 18 GPIO_ACTIVE_HIGH>;
+			power-supply = <&vreg_edp>;
+
+			pinctrl-0 = <&edp_bl_en>;
+			pinctrl-names = "default";
+
+			port {
+				edp_panel_in: endpoint {
+					remote-endpoint = <&mdss_dp3_out>;
+				};
+			};
+		};
+	};
+};
+
+&mdss_dp3_out {
+	/*
+	 * The panel (SHP 0x1572, eDP 1.4) advertises the intermediate link rates
+	 * 1.62/2.16/2.43/2.70/3.24/3.78/4.32 Gbps. The msm driver takes the highest
+	 * rate under the last link-frequencies entry, and the glymur eDP PHY driver
+	 * can only program 1.62/2.7/5.4/8.1 Gbps: with a 5.4 or 8.1 GHz cap it
+	 * chose 4.32, the PHY refused it (ignored by dp_ctrl), and channel
+	 * equalisation failed at every attempt with a PLL-unlocked AUX IRQ. A 2.7
+	 * GHz cap makes the table lookup land on a programmable rate; four lanes
+	 * at 2.7 Gbps carry 2304x1536@60. Proper fix: teach the PHY driver the
+	 * eDP 1.4 rates and make dp_ctrl honour phy_power_on() failures.
+	 */
+	data-lanes = <0 1 2 3>;
+	link-frequencies = /bits/ 64 <1620000000 2700000000 5400000000>;
+
+	remote-endpoint = <&edp_panel_in>;
+};
+
+&mdss_dp3_phy {
+	vdda-phy-supply = <&vreg_l2f_e1>;
+	vdda-pll-supply = <&vreg_l4f_e1>;
+
+	status = "okay";
+};
+
+&pcie4 {
+	pinctrl-0 = <&pcie4_default>;
+	pinctrl-names = "default";
+
+	status = "okay";
+};
+
+&pcie4_phy {
+	vdda-phy-supply = <&vreg_l1c_e1>;
+	vdda-pll-supply = <&vreg_l4f_e1>;
+
+	status = "okay";
+};
+
+&pcie4_port0 {
+	reset-gpios = <&tlmm 146 GPIO_ACTIVE_LOW>;
+	wake-gpios = <&tlmm 148 GPIO_ACTIVE_LOW>;
+};
+
+&pcie4_port0_ep {
+	remote-endpoint = <&m2_e_pcie_ep>;
+};
+
+&pcie5 {
+	pinctrl-0 = <&pcie5_default>;
+	pinctrl-names = "default";
+
+	status = "okay"; /* Internal NVMe: read-only validation passed on kernel 1.8. */
+};
+
+&pcie5_phy {
+	vdda-phy-supply = <&vreg_l2f_e0>;
+	vdda-pll-supply = <&vreg_l4f_e1>;
+
+	status = "okay"; /* Internal NVMe: read-only validation passed on kernel 1.8. */
+};
+
+&pcie5_port0 {
+	reset-gpios = <&tlmm 152 GPIO_ACTIVE_LOW>;
+	wake-gpios = <&tlmm 154 GPIO_ACTIVE_LOW>;
+};
+
+&pmk8850_rtc {
+	qcom,uefi-rtc-info;
+	qcom,no-alarm;
+};
+
+&remoteproc_adsp {
+	firmware-name = "qcom/glymur/microsoft/surface-laptop8/qcadsp8480.mbn",
+			"qcom/glymur/microsoft/surface-laptop8/adsp_dtbs.elf";
+
+	status = "okay";
+};
+
+&remoteproc_cdsp {
+	firmware-name = "qcom/glymur/microsoft/surface-laptop8/qccdsp8480.mbn",
+			"qcom/glymur/microsoft/surface-laptop8/cdsp_dtbs.elf";
+
+	status = "okay";
+};
+
+&remoteproc_soccp {
+	firmware-name = "qcom/glymur/microsoft/surface-laptop8/soccp.mbn",
+			"qcom/glymur/microsoft/surface-laptop8/soccp_dtb.mbn";
+};
+
+&smb2370_j_e2_eusb2_repeater {
+	vdd18-supply = <&vreg_l15b_e0>;
+	vdd3-supply = <&vreg_l7b_e0>;
+};
+
+&smb2370_k_e2_eusb2_repeater {
+	vdd18-supply = <&vreg_l15b_e0>;
+	vdd3-supply = <&vreg_l7b_e0>;
+};
+
+&tcsr {
+	vdda-qrefrpt0-0p9-supply = <&vreg_l2f_e1>;
+	vdda-qrefrpt1-0p9-supply = <&vreg_l2f_e1>;
+	vdda-qrefrpt2-0p9-supply = <&vreg_l2f_e1>;
+	vdda-qrefrpt3-0p9-supply = <&vreg_l1f_e1>;
+	vdda-qrefrpt4-0p9-supply = <&vreg_l2f_e1>;
+	vdda-qrefrpt5-0p9-supply = <&vreg_l2f_e1>;
+	vdda-qrefrx0-0p9-supply = <&vreg_l2f_e1>;
+	vdda-qrefrx1-0p9-supply = <&vreg_l2f_e1>;
+	vdda-qrefrx2-0p9-supply = <&vreg_l2f_e1>;
+	vdda-qrefrx3-0p9-supply = <&vreg_l2f_e1>;
+	vdda-qreftx1-0p9-supply = <&vreg_l1f_e1>;
+	vdda-refgen3-0p9-supply = <&vreg_l1f_e1>;
+	vdda-refgen3-1p2-supply = <&vreg_l4f_e1>;
+};
+
+&tlmm {
+	gpio-reserved-ranges = <4 4>, /* EC Secure I3C */
+			       <10 2>, /* OOB UART */
+			       <44 4>, /* TPM */
+			       <65 1>; /* EC reset (Zenbook/Yoga; unverified here) */
+
+	tpad_default: tpad-default-state {
+		pins = "gpio3";
+		function = "gpio";
+		bias-disable;
+	};
+
+	edp_bl_en: edp-bl-en-state {
+		pins = "gpio18";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-disable;
+	};
+
+	digitizer_default: digitizer-default-state {
+		pins = "gpio51";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	ssam_state: ssam-state-state {
+		pins = "gpio71";
+		function = "gpio";
+		bias-disable;
+	};
+
+	ts_default: ts-default-state {
+		pins = "gpio43";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	edp_pwr_en: edp-pwr-en-state {
+		pins = "gpio70";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-disable;
+	};
+
+	wcn_wlan_bt_en: wcn-wlan-bt-en-state {
+		pins = "gpio116", "gpio117";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	edp0_hpd_default: edp0-hpd-default-state {
+		pins = "gpio119";
+		function = "edp0_hot";
+		bias-disable;
+	};
+
+	pcie4_default: pcie4-default-state {
+		clkreq-n-pins {
+			pins = "gpio147";
+			function = "pcie4_clk_req_n";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+
+		perst-n-pins {
+			pins = "gpio146";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		wake-n-pins {
+			pins = "gpio148";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+	};
+
+	pcie5_default: pcie5-default-state {
+		clkreq-n-pins {
+			pins = "gpio153";
+			function = "pcie5_clk_req_n";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+
+		perst-n-pins {
+			pins = "gpio152";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		wake-n-pins {
+			pins = "gpio154";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+	};
+};
+
+&uart14 {
+	status = "okay";
+
+	port {
+		uart14_ep: endpoint {
+			remote-endpoint = <&m2_e_uart_ep>;
+		};
+	};
+};
+
+&uart21 {
+	status = "okay";
+};
+
+/* ACPI UR23 @ 0x898000: Surface Serial Hub, MSHW0084 */
+&uart22 {
+	status = "okay";
+
+	embedded-controller {
+		compatible = "microsoft,surface-sam";
+
+		interrupts-extended = <&tlmm 71 IRQ_TYPE_EDGE_RISING>;
+
+		current-speed = <4000000>;
+
+		pinctrl-0 = <&ssam_state>;
+		pinctrl-names = "default";
+	};
+};
+
+&usb_0 {
+	/* Host only for bring-up: the role switch needs pmic-glink via the ADSP firmware we do not have (as x1e80100-microsoft-romulus). */
+	dr_mode = "host";
+
+	status = "okay";
+};
+
+&usb_0_dwc3_hs {
+	remote-endpoint = <&pmic_glink_hs_in>;
+};
+
+&usb_0_hsphy {
+	vdd-supply = <&vreg_l3f_e0>;
+	vdda12-supply = <&vreg_l4f_e1>;
+
+	phys = <&smb2370_j_e2_eusb2_repeater>;
+
+	status = "okay";
+};
+
+&usb_0_qmpphy {
+	vdda-phy-supply = <&vreg_l3f_e0>;
+	vdda-pll-supply = <&vreg_l4f_e1>;
+	refgen-supply = <&vreg_l2f_e0>;
+
+	status = "okay";
+};
+
+&usb_0_qmpphy_out {
+	remote-endpoint = <&pmic_glink_ss_in>;
+};
+
+&usb_1 {
+	dr_mode = "host";
+
+	status = "okay";
+};
+
+&usb_1_dwc3_hs {
+	remote-endpoint = <&pmic_glink_hs_in1>;
+};
+
+&usb_1_hsphy {
+	vdd-supply = <&vreg_l3f_e0>;
+	vdda12-supply = <&vreg_l4f_e1>;
+
+	phys = <&smb2370_k_e2_eusb2_repeater>;
+
+	status = "okay";
+};
+
+&usb_1_qmpphy {
+	vdda-phy-supply = <&vreg_l2f_e0>;
+	vdda-pll-supply = <&vreg_l4f_e1>;
+	refgen-supply = <&vreg_l2f_e0>;
+
+	status = "okay";
+};
+
+&usb_1_qmpphy_out {
+	remote-endpoint = <&pmic_glink_ss_in1>;
+};
+
+/* Multiport controller (ACPI USB3): the USB-A port and a second port. Host only by design. */
+&usb_mp {
+	status = "okay";
+};
+
+&usb_mp_hsphy0 {
+	vdd-supply = <&vreg_l2f_e1>;
+	vdda12-supply = <&vreg_l4f_e1>;
+
+	status = "okay";
+};
+
+&usb_mp_hsphy1 {
+	vdd-supply = <&vreg_l2f_e1>;
+	vdda12-supply = <&vreg_l4f_e1>;
+
+	status = "okay";
+};
+
+&usb_mp_qmpphy0 {
+	vdda-phy-supply = <&vreg_l2f_e1>;
+	vdda-pll-supply = <&vreg_l4f_e1>;
+	refgen-supply = <&vreg_l4f_e1>;
+
+	status = "okay";
+};
+
+&usb_mp_qmpphy1 {
+	vdda-phy-supply = <&vreg_l2f_e1>;
+	vdda-pll-supply = <&vreg_l4f_e1>;
+	refgen-supply = <&vreg_l4f_e1>;
+
+	status = "okay";
+};

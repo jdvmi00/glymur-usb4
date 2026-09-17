@@ -1,0 +1,84 @@
+--- a/drivers/gpu/drm/msm/dp/dp_ctrl.c	2026-09-10 23:53:39.075244217 -0500
++++ b/drivers/gpu/drm/msm/dp/dp_ctrl.c	2026-09-10 23:54:34.488806141 -0500
+@@ -1587,7 +1587,13 @@
+ 
+ 	*training_step = DP_TRAINING_2;
+ 
+-	if (drm_dp_tps4_supported(panel->dpcd)) {
++	/*
++	 * Bring-up (Surface Laptop 8, glymur/mahua): the Sharp LQ138P1JX61 eDP
++	 * 1.4 panel advertises TPS4 but channel equalisation never completes
++	 * with it, while the firmware trains the same panel as a DPCD 1.2 sink
++	 * (TPS3). Prefer TPS3 until the TPS4 path on this SoC is understood.
++	 */
++	if (0 && drm_dp_tps4_supported(panel->dpcd)) {
+ 		pattern = DP_TRAINING_PATTERN_4;
+ 		state_ctrl_bit = 4;
+ 	} else if (drm_dp_tps3_supported(panel->dpcd)) {
+@@ -1835,8 +1841,17 @@
+ 	ctrl->phy_opts.dp.link_rate = ctrl->link->link_params.rate / 100;
+ 	ctrl->phy_opts.dp.ssc = drm_dp_max_downspread(dpcd);
+ 
+-	phy_configure(phy, &ctrl->phy_opts);
+-	phy_power_on(phy);
++	ret = phy_configure(phy, &ctrl->phy_opts);
++	if (ret) {
++		DRM_ERROR("Unable to configure phy for %u kHz / %u lanes. ret=%d\n",
++			  ctrl->phy_opts.dp.link_rate * 100, ctrl->phy_opts.dp.lanes, ret);
++		return ret;
++	}
++	ret = phy_power_on(phy);
++	if (ret) {
++		DRM_ERROR("Unable to power on phy. ret=%d\n", ret);
++		return ret;
++	}
+ 
+ 	dev_pm_opp_set_rate(ctrl->dev, ctrl->link->link_params.rate * 1000);
+ 	ret = msm_dp_ctrl_link_clk_enable(&ctrl->msm_dp_ctrl);
+--- a/drivers/phy/qualcomm/phy-qcom-edp.c	2026-09-10 23:53:39.403249457 -0500
++++ b/drivers/phy/qualcomm/phy-qcom-edp.c	2026-09-10 23:54:34.489402011 -0500
+@@ -432,6 +432,12 @@
+ 		*pixel_freq = 2700000000UL / 2;
+ 		break;
+ 
++	case 4320:
++		/* eDP 1.4 intermediate rate: 8.64 GHz VCO / 2, pixel clock / 4 */
++		vco_div = edp->cfg->vco_div_cfg[2];
++		*pixel_freq = 4320000000UL / 4;
++		break;
++
+ 	case 5400:
+ 		vco_div = edp->cfg->vco_div_cfg[2];
+ 		*pixel_freq = 5400000000UL / 4;
+@@ -917,6 +923,7 @@
+ 	switch (dp_opts->link_rate) {
+ 	case 1620:
+ 	case 2700:
++	case 4320:
+ 	case 8100:
+ 		step1 = 0x5b;
+ 		step2 = 0x02;
+@@ -977,6 +984,23 @@
+ 		code2_mode0 = 0x0c;
+ 		break;
+ 
++	case 4320:
++		/*
++		 * eDP 1.4 intermediate rate (Surface Laptop 8 bring-up):
++		 * VCO = 8 * 19.2 MHz * 56.25 = 8640 MHz, post-divider /2.
++		 * Derived from the 8.1 GHz family entries; unverified against
++		 * vendor tables.
++		 */
++		hsclk_sel = 0x1;
++		dec_start_mode0 = 0x38;
++		div_frac_start2_mode0 = 0x00;
++		div_frac_start3_mode0 = 0x04;
++		lock_cmp1_mode0 = 0x3f;
++		lock_cmp2_mode0 = 0x0b;
++		code1_mode0 = 0x46;
++		code2_mode0 = 0x0d;
++		break;
++
+ 	case 5400:
+ 	case 8100:
+ 		hsclk_sel = 0x2;

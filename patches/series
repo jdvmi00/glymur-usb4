@@ -1,0 +1,9 @@
+0001-phy-qualcomm-usb4.patch
+0002-clk-qcom-usb4.patch
+0003-thunderbolt-shared-host.patch
+0004-usb-qcom-glink-dock.patch
+0005-thunderbolt-qcom-router.patch
+0006-drm-msm-dpu-routing-dsc.patch
+0007-drm-msm-dp-tunneling.patch
+0008-arm64-dts-qcom-usb4.patch
+0009-arm64-dts-surface-usb4.patch

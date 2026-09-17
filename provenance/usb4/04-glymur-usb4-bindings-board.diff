@@ -1,0 +1,106 @@
+--- a/Documentation/devicetree/bindings/phy/qcom,sc8280xp-qmp-usb43dp-phy.yaml
++++ b/Documentation/devicetree/bindings/phy/qcom,sc8280xp-qmp-usb43dp-phy.yaml
+@@ -82,6 +82,14 @@
+     description:
+       See include/dt-bindings/phy/phy-qcom-qmp.h
+ 
++  qcom,usb4-rx-eq:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 255
++    description:
++      Board-specific Glymur USB4 receiver equalization value written to
++      RX_MODE_RATE3_B4 on both lane blocks. Required when the USB4 PHY is used.
++
+   mode-switch: true
+   orientation-switch: true
+ 
+@@ -182,16 +190,28 @@
+ allOf:
+   - $ref: /schemas/usb/usb-switch.yaml#
+   - if:
++      not:
++        properties:
++          compatible:
++            contains:
++              const: qcom,glymur-qmp-usb3-dp-phy
++    then:
++      properties:
++        qcom,usb4-rx-eq: false
++
++  - if:
+       properties:
+         compatible:
+           contains:
+             enum:
++              - qcom,glymur-qmp-usb3-dp-phy
+               - qcom,x1e80100-qmp-usb3-dp-phy
+     then:
+       properties:
+         clocks:
+           maxItems: 5
+         clock-names:
++          minItems: 4
+           items:
+             - const: aux
+             - const: ref
+@@ -224,6 +244,7 @@
+           compatible:
+             contains:
+               enum:
++                - qcom,glymur-qmp-usb3-dp-phy
+                 - qcom,x1e80100-qmp-usb3-dp-phy
+                 - qcom,sc7180-qmp-usb3-dp-phy
+                 - qcom,sdm845-qmp-usb3-dp-phy
+--- a/arch/arm64/boot/dts/qcom/glymur.dtsi
++++ b/arch/arm64/boot/dts/qcom/glymur.dtsi
+@@ -2517,11 +2517,13 @@
+ 			clocks = <&gcc GCC_USB3_PRIM_PHY_AUX_CLK>,
+ 				 <&rpmhcc RPMH_CXO_CLK>,
+ 				 <&gcc GCC_USB3_PRIM_PHY_COM_AUX_CLK>,
+-				 <&gcc GCC_USB3_PRIM_PHY_PIPE_CLK>;
++				 <&gcc GCC_USB3_PRIM_PHY_PIPE_CLK>,
++				 <&gcc GCC_USB4_0_PHY_P2RR2P_PIPE_CLK>;
+ 			clock-names = "aux",
+ 				      "ref",
+ 				      "com_aux",
+-				      "usb3_pipe";
++				      "usb3_pipe",
++				      "p2rr2p_pipe";
+ 
+ 			resets = <&gcc GCC_USB3_PHY_PRIM_BCR>,
+ 				 <&gcc GCC_USB3PHY_PHY_PRIM_BCR>;
+@@ -2590,11 +2592,13 @@
+ 			clocks = <&gcc GCC_USB3_SEC_PHY_AUX_CLK>,
+ 				 <&tcsr TCSR_USB4_1_CLKREF_EN>,
+ 				 <&gcc GCC_USB3_SEC_PHY_COM_AUX_CLK>,
+-				 <&gcc GCC_USB3_SEC_PHY_PIPE_CLK>;
++				 <&gcc GCC_USB3_SEC_PHY_PIPE_CLK>,
++				 <&gcc GCC_USB4_1_PHY_P2RR2P_PIPE_CLK>;
+ 			clock-names = "aux",
+ 				      "ref",
+ 				      "com_aux",
+-				      "usb3_pipe";
++				      "usb3_pipe",
++				      "p2rr2p_pipe";
+ 
+ 			power-domains = <&gcc GCC_USB_1_PHY_GDSC>;
+ 
+--- a/arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts
++++ b/arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts
+@@ -927,6 +927,7 @@
+ };
+ 
+ &usb_0_qmpphy {
++	qcom,usb4-rx-eq = <0x6f>;
+ 	vdda-phy-supply = <&vreg_l3f_e0>;
+ 	vdda-pll-supply = <&vreg_l4f_e1>;
+ 	refgen-supply = <&vreg_l2f_e0>;
+@@ -958,6 +959,7 @@
+ };
+ 
+ &usb_1_qmpphy {
++	qcom,usb4-rx-eq = <0x6f>;
+ 	vdda-phy-supply = <&vreg_l2f_e0>;
+ 	vdda-pll-supply = <&vreg_l4f_e1>;
+ 	refgen-supply = <&vreg_l2f_e0>;

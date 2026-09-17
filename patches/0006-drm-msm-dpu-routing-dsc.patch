@@ -1,0 +1,1396 @@
+Subject: [REVIEW 06/09] DPU routing, quad-pipe DSC and plane lifecycle
+
+Carry multi-mixer/DSC support, DPU-owned USB4 routing and restoration after power loss, and geometry reset on console transitions. Review runtime-PM references, cached registers and native display regressions.
+
+Dependencies: Base prerequisites. Supplies the DPU side of patch 07; evaluated with the complete host/display stack.
+
+Source attribution: Jun Nie quad-pipe work with original Jun Nie and Dmitry Baryshkov sign-offs in provenance/display/0040-drm-msm-dpu-Enable-quad-pipe-for-DSC-and-dual-DSI-ca.patch; local DSC/routing/lifecycle adaptations in provenance/display/ and provenance/derivation.json.
+
+This is a review grouping of preserved source, not a new authorship claim or
+an independently build-validated upstream commit. Original attribution remains
+in the referenced provenance files. No new Signed-off-by trailers are added.
+
+---
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_12_2_glymur.h b/drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_12_2_glymur.h
+index 4eb4a0e9803ea152f9040e9137f1bcf409fe6c9b..5062e374109c91cefc26a2b142372bcea7e940b9 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_12_2_glymur.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_12_2_glymur.h
+@@ -175,6 +175,7 @@ static const struct dpu_lm_cfg glymur_lm[] = {
+ 		.sblk = &sm8750_lm_sblk,
+ 		.lm_pair = LM_5,
+ 		.pingpong = PINGPONG_4,
++		.dspp = DSPP_4,
+ 	}, {
+ 		.name = "lm_5", .id = LM_5,
+ 		.base = 0x49000, .len = 0x400,
+@@ -182,6 +183,7 @@ static const struct dpu_lm_cfg glymur_lm[] = {
+ 		.sblk = &sm8750_lm_sblk,
+ 		.lm_pair = LM_4,
+ 		.pingpong = PINGPONG_5,
++		.dspp = DSPP_5,
+ 	}, {
+ 		.name = "lm_6", .id = LM_6,
+ 		.base = 0x4a000, .len = 0x400,
+@@ -189,6 +191,7 @@ static const struct dpu_lm_cfg glymur_lm[] = {
+ 		.sblk = &sm8750_lm_sblk,
+ 		.lm_pair = LM_7,
+ 		.pingpong = PINGPONG_6,
++		.dspp = DSPP_6,
+ 	}, {
+ 		.name = "lm_7", .id = LM_7,
+ 		.base = 0x4b000, .len = 0x400,
+@@ -196,6 +199,7 @@ static const struct dpu_lm_cfg glymur_lm[] = {
+ 		.sblk = &sm8750_lm_sblk,
+ 		.lm_pair = LM_6,
+ 		.pingpong = PINGPONG_7,
++		.dspp = DSPP_7,
+ 	},
+ };
+ 
+@@ -238,60 +242,60 @@ static const struct dpu_dspp_cfg glymur_dspp[] = {
+ static const struct dpu_pingpong_cfg glymur_pp[] = {
+ 	{
+ 		.name = "pingpong_0", .id = PINGPONG_0,
+-		.base = 0x69000, .len = 0,
++		.base = 0x69000, .len = 0x100,
+ 		.sblk = &sc7280_pp_sblk,
+ 		.merge_3d = MERGE_3D_0,
+ 		.intr_done = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR, 8),
+ 	}, {
+ 		.name = "pingpong_1", .id = PINGPONG_1,
+-		.base = 0x6a000, .len = 0,
++		.base = 0x6a000, .len = 0x100,
+ 		.sblk = &sc7280_pp_sblk,
+ 		.merge_3d = MERGE_3D_0,
+ 		.intr_done = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR, 9),
+ 	}, {
+ 		.name = "pingpong_2", .id = PINGPONG_2,
+-		.base = 0x6b000, .len = 0,
++		.base = 0x6b000, .len = 0x100,
+ 		.sblk = &sc7280_pp_sblk,
+ 		.merge_3d = MERGE_3D_1,
+ 		.intr_done = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR, 10),
+ 	}, {
+ 		.name = "pingpong_3", .id = PINGPONG_3,
+-		.base = 0x6c000, .len = 0,
++		.base = 0x6c000, .len = 0x100,
+ 		.sblk = &sc7280_pp_sblk,
+ 		.merge_3d = MERGE_3D_1,
+ 		.intr_done = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR, 11),
+ 	}, {
+ 		.name = "pingpong_4", .id = PINGPONG_4,
+-		.base = 0x6d000, .len = 0,
++		.base = 0x6d000, .len = 0x100,
+ 		.sblk = &sc7280_pp_sblk,
+ 		.merge_3d = MERGE_3D_2,
+ 		.intr_done = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR2, 30),
+ 	}, {
+ 		.name = "pingpong_5", .id = PINGPONG_5,
+-		.base = 0x6e000, .len = 0,
++		.base = 0x6e000, .len = 0x100,
+ 		.sblk = &sc7280_pp_sblk,
+ 		.merge_3d = MERGE_3D_2,
+ 		.intr_done = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR2, 31),
+ 	}, {
+ 		.name = "pingpong_6", .id = PINGPONG_6,
+-		.base = 0x6f000, .len = 0,
++		.base = 0x6f000, .len = 0x100,
+ 		.sblk = &sc7280_pp_sblk,
+ 		.merge_3d = MERGE_3D_3,
+ 		.intr_done = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR2, 20),
+ 	}, {
+ 		.name = "pingpong_7", .id = PINGPONG_7,
+-		.base = 0x70000, .len = 0,
++		.base = 0x70000, .len = 0x100,
+ 		.sblk = &sc7280_pp_sblk,
+ 		.merge_3d = MERGE_3D_3,
+ 		.intr_done = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR2, 21),
+ 	}, {
+ 		.name = "pingpong_cwb_0", .id = PINGPONG_CWB_0,
+-		.base = 0x66000, .len = 0,
++		.base = 0x66000, .len = 0x100,
+ 		.sblk = &sc7280_pp_sblk,
+ 		.merge_3d = MERGE_3D_4,
+ 	}, {
+ 		.name = "pingpong_cwb_1", .id = PINGPONG_CWB_1,
+-		.base = 0x66400, .len = 0,
++		.base = 0x66400, .len = 0x100,
+ 		.sblk = &sc7280_pp_sblk,
+ 		.merge_3d = MERGE_3D_4,
+ 	},
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c
+index 42d0a529b4d515712de3ac2e6e46873406b61adc..90fb08a88dcd9dda0f1496f52eb4cd9f3e4e52b6 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c
+@@ -200,7 +200,7 @@ static int dpu_crtc_get_lm_crc(struct drm_crtc *crtc,
+ 		struct dpu_crtc_state *crtc_state)
+ {
+ 	struct dpu_crtc_mixer *m;
+-	u32 crcs[CRTC_DUAL_MIXERS];
++	u32 crcs[CRTC_QUAD_MIXERS];
+ 
+ 	int rc = 0;
+ 	int i;
+@@ -1376,6 +1376,28 @@ static int dpu_crtc_reassign_planes(struct drm_crtc *crtc, struct drm_crtc_state
+ #define MAX_CHANNELS_PER_CRTC PIPES_PER_PLANE
+ #define MAX_HDISPLAY_SPLIT 1080
+ 
++/*
++ * Four mixers feeding one interface need four DSC encoders merged by the
++ * DSC 4HS merge block of DPU 9 and later, and virtual planes to split a
++ * plane across two mixer pairs.
++ */
++
++static bool dpu_dsc_force_quad;
++module_param(dpu_dsc_force_quad, bool, 0644);
++MODULE_PARM_DESC(dpu_dsc_force_quad, "DSC: four mixers and four merged encoders for every compressed DP mode (bring-up knob)");
++
++static bool dpu_dsc_single_pipe;
++module_param(dpu_dsc_single_pipe, bool, 0644);
++MODULE_PARM_DESC(dpu_dsc_single_pipe, "DSC: one mixer and one encoder for modes that fit a mixer (bring-up knob)");
++
++static bool dpu_crtc_quad_dsc_supported(const struct dpu_kms *dpu_kms)
++{
++	return dpu_use_virtual_planes &&
++	       dpu_kms->catalog->mdss_ver->core_major_ver >= 9 &&
++	       dpu_kms->catalog->caps->has_3d_merge &&
++	       dpu_kms->catalog->dsc_count >= 4;
++}
++
+ static struct msm_display_topology dpu_crtc_get_topology(
+ 		struct drm_crtc *crtc,
+ 		struct dpu_kms *dpu_kms,
+@@ -1384,6 +1406,9 @@ static struct msm_display_topology dpu_crtc_get_topology(
+ 	struct drm_display_mode *mode = &crtc_state->adjusted_mode;
+ 	struct msm_display_topology topology = {0};
+ 	struct drm_encoder *drm_enc;
++	struct msm_drm_private *priv = crtc->dev->dev_private;
++	struct dpu_kms *kms = to_dpu_kms(priv->kms);
++	u32 num_rt_intf;
+ 
+ 	drm_for_each_encoder_mask(drm_enc, crtc->dev, crtc_state->encoder_mask)
+ 		dpu_encoder_update_topology(drm_enc, &topology, crtc_state->state,
+@@ -1396,32 +1421,62 @@ static struct msm_display_topology dpu_crtc_get_topology(
+ 	 *
+ 	 * Dual display
+ 	 * 2 LM, 2 INTF ( Split display using 2 interfaces)
++	 * 4 LM, 2 INTF ( Split display using 2 interfaces and stream merge
++			  to support high resolution interfaces if virtual
++			  plane is enabled)
++	 * If DSC is enabled, use 2:2:2 for 2 LMs case, and 4:4:2 for 4 LMs
++	 * case.
+ 	 *
+ 	 * Single display
+ 	 * 1 LM, 1 INTF
+ 	 * 2 LM, 1 INTF (stream merge to support high resolution interfaces)
+ 	 *
+-	 * If DSC is enabled, use 2 LMs for 2:2:1 topology
++	 * If DSC is enabled, use 2 LMs for 2:2:1 topology for single display
++	 * to support legacy devices that use this topology. Use 1:1:1 topology
++	 * if there is only one DSC engine in SoC.
+ 	 *
+ 	 * Add dspps to the reservation requirements if ctm or gamma_lut are requested
+-	 *
+-	 * Only hardcode num_lm to 2 for cases where num_intf == 2 and CWB is not
+-	 * enabled. This is because in cases where CWB is enabled, num_intf will
+-	 * count both the WB and real-time phys encoders.
+-	 *
+-	 * For non-DSC CWB usecases, have the num_lm be decided by the
+-	 * (mode->hdisplay > MAX_HDISPLAY_SPLIT) check.
+ 	 */
+ 
+-	if (topology.num_intf == 2 && !topology.cwb_enabled)
+-		topology.num_lm = 2;
+-	else if (topology.num_dsc == 2)
+-		topology.num_lm = 2;
+-	else if (dpu_kms->catalog->caps->has_3d_merge &&
+-		 topology.num_dsc == 0)
+-		topology.num_lm = (mode->hdisplay > MAX_HDISPLAY_SPLIT) ? 2 : 1;
+-	else
+-		topology.num_lm = 1;
++	num_rt_intf = topology.num_intf;
++	if (topology.cwb_enabled)
++		num_rt_intf--;
++
++	if ((mode->hdisplay > (dpu_kms->catalog->caps->max_mixer_width * num_rt_intf)) ||
++	    ((u64)mode->hdisplay * mode->vtotal * drm_mode_vrefresh(mode) >
++	     kms->perf.max_core_clk_rate))
++		topology.num_lm = num_rt_intf * 2;
++	else {
++		topology.num_lm = (mode->hdisplay > MAX_HDISPLAY_SPLIT) ?
++				  2 : num_rt_intf;
++	}
++
++	if (!dpu_use_virtual_planes ||
++	    dpu_kms->catalog->mdss_ver->core_major_ver < 5)
++		topology.num_lm = min(2, topology.num_lm);
++
++	if (!dpu_kms->catalog->caps->has_3d_merge)
++		topology.num_lm = min(num_rt_intf, topology.num_lm);
++
++	if (topology.num_dsc) {
++		if (num_rt_intf == 1) {
++			/*
++			 * One interface takes two merged DSC encoders, or
++			 * four merged as two pairs when the mode is wider
++			 * than two mixers (DPU 9+ DSC 4HS merge).
++			 */
++			if (dpu_crtc_quad_dsc_supported(dpu_kms) &&
++			    (dpu_dsc_force_quad ||
++			     mode->hdisplay > 2 * dpu_kms->catalog->caps->max_mixer_width))
++				topology.num_lm = 4;
++			else if (dpu_dsc_single_pipe &&
++				 mode->hdisplay <= dpu_kms->catalog->caps->max_mixer_width)
++				topology.num_lm = 1;
++			else
++				topology.num_lm = min(2, dpu_kms->catalog->dsc_count);
++		}
++		topology.num_dsc = topology.num_lm;
++	}
+ 
+ 	if (crtc_state->ctm || crtc_state->gamma_lut)
+ 		topology.num_dspp = topology.num_lm;
+@@ -1612,7 +1667,10 @@ static enum drm_mode_status dpu_crtc_mode_valid(struct drm_crtc *crtc,
+ 	adjusted_mode_clk = dpu_core_perf_adjusted_mode_clk(mode->clock,
+ 							    dpu_kms->perf.perf_cfg);
+ 
+-	if (dpu_kms->catalog->caps->has_3d_merge)
++	if (dpu_crtc_quad_dsc_supported(dpu_kms) &&
++	    mode->hdisplay > 2 * dpu_kms->catalog->caps->max_mixer_width)
++		adjusted_mode_clk /= 4;
++	else if (dpu_kms->catalog->caps->has_3d_merge)
+ 		adjusted_mode_clk /= 2;
+ 
+ 	/*
+@@ -1623,10 +1681,12 @@ static enum drm_mode_status dpu_crtc_mode_valid(struct drm_crtc *crtc,
+ 		return MODE_CLOCK_HIGH;
+ 
+ 	/*
+-	 * max crtc width is equal to the max mixer width * 2 and max height is 4K
++	 * max crtc width is equal to the max mixer width * 2, or * 4 with the
++	 * four-encoder DSC merge, and max height is 4K
+ 	 */
+ 	return drm_mode_validate_size(mode,
+-				      2 * dpu_kms->catalog->caps->max_mixer_width,
++				      (dpu_crtc_quad_dsc_supported(dpu_kms) ? 4 : 2) *
++				      dpu_kms->catalog->caps->max_mixer_width,
+ 				      4096);
+ }
+ 
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.h
+index 6eaba5696e8e6bd1246a9895c4c8714ca6589b10..455073c7025b0bcb970d8817f197d9bcacc6dca5 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.h
+@@ -210,7 +210,7 @@ struct dpu_crtc_state {
+ 
+ 	bool bw_control;
+ 	bool bw_split_vote;
+-	struct drm_rect lm_bounds[CRTC_DUAL_MIXERS];
++	struct drm_rect lm_bounds[CRTC_QUAD_MIXERS];
+ 
+ 	uint64_t input_fence_timeout_ns;
+ 
+@@ -218,10 +218,10 @@ struct dpu_crtc_state {
+ 
+ 	/* HW Resources reserved for the crtc */
+ 	u32 num_mixers;
+-	struct dpu_crtc_mixer mixers[CRTC_DUAL_MIXERS];
++	struct dpu_crtc_mixer mixers[CRTC_QUAD_MIXERS];
+ 
+ 	u32 num_ctls;
+-	struct dpu_hw_ctl *hw_ctls[CRTC_DUAL_MIXERS];
++	struct dpu_hw_ctl *hw_ctls[CRTC_QUAD_MIXERS];
+ 
+ 	enum dpu_crtc_crc_source crc_source;
+ 	int crc_frame_skip_count;
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+index 1f20695f81e35cc0868d981b89c4a2dd38409799..42bec1d8e4dc5fdc755fb68b8f2afd822898f2a1 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+@@ -9,6 +9,7 @@
+ 
+ #define pr_fmt(fmt)	"[drm:%s:%d] " fmt, __func__, __LINE__
+ #include <linux/debugfs.h>
++#include <linux/moduleparam.h>
+ #include <linux/kthread.h>
+ #include <linux/seq_file.h>
+ 
+@@ -55,7 +56,7 @@
+ #define MAX_PHYS_ENCODERS_PER_VIRTUAL \
+ 	(MAX_H_TILES_PER_DISPLAY * NUM_PHYS_ENCODER_TYPES)
+ 
+-#define MAX_CHANNELS_PER_ENC 2
++#define MAX_CHANNELS_PER_ENC 4
+ #define MAX_CWB_PER_ENC 2
+ 
+ #define IDLE_SHORT_TIMEOUT	1
+@@ -215,6 +216,8 @@ struct dpu_encoder_virt {
+ 
+ 	/* DSC configuration */
+ 	struct drm_dsc_config *dsc;
++	/* bring-up override of the DSC initial line latency, 0 = computed */
++	u32 dsc_initial_lines;
+ };
+ 
+ #define to_dpu_encoder_virt(x) container_of(x, struct dpu_encoder_virt, base)
+@@ -296,6 +299,24 @@ bool dpu_encoder_is_widebus_enabled(const struct drm_encoder *drm_enc)
+  *				for the encoder.
+  * @drm_enc:    Pointer to previously created drm encoder structure
+  */
++extern bool dpu_dsc_pp_out_swap;
++
++static unsigned int dpu_dsc_initial_lines;
++module_param(dpu_dsc_initial_lines, uint, 0644);
++MODULE_PARM_DESC(dpu_dsc_initial_lines, "DSC: override the encoder initial line latency (0: computed)");
++
++static unsigned int dpu_pp_fifo_lines;
++module_param(dpu_pp_fifo_lines, uint, 0644);
++MODULE_PARM_DESC(dpu_pp_fifo_lines, "pingpong FIFO size in lines of the mode, split over the pingpongs (0: leave the reset value)");
++
++static unsigned int dpu_dsc_mode_clear;
++module_param(dpu_dsc_mode_clear, uint, 0644);
++MODULE_PARM_DESC(dpu_dsc_mode_clear, "DSC: common mode bits to clear, 1 split panel, 2 multiplex (bring-up knob)");
++
++static bool dpu_dsc_clear_int;
++module_param(dpu_dsc_clear_int, bool, 0644);
++MODULE_PARM_DESC(dpu_dsc_clear_int, "DSC: clear the encoder interrupt status on every frame (bring-up knob)");
++
+ bool dpu_encoder_is_dsc_enabled(const struct drm_encoder *drm_enc)
+ {
+ 	const struct dpu_encoder_virt *dpu_enc = to_dpu_encoder_virt(drm_enc);
+@@ -650,9 +671,32 @@ struct drm_dsc_config *dpu_encoder_get_dsc_config(struct drm_encoder *drm_enc)
+ 	if (dpu_enc->disp_info.intf_type == INTF_DSI)
+ 		return msm_dsi_get_dsc_config(priv->kms->dsi[index]);
+ 
++	if (dpu_enc->disp_info.intf_type == INTF_DP)
++		return msm_dp_get_dsc_config(priv->kms->dp[index], NULL);
++
+ 	return NULL;
+ }
+ 
++/**
++ * dpu_encoder_get_dp_dsc_timing - extra interface timing of a compressed DP stream
++ * @drm_enc: Pointer to encoder structure
++ * @timing: filled in when the DP stream is compressed
++ *
++ * Returns: true when the encoder drives a compressed DP stream
++ */
++bool dpu_encoder_get_dp_dsc_timing(struct drm_encoder *drm_enc,
++				   struct msm_dp_dsc_intf_timing *timing)
++{
++	struct msm_drm_private *priv = drm_enc->dev->dev_private;
++	struct dpu_encoder_virt *dpu_enc = to_dpu_encoder_virt(drm_enc);
++	int index = dpu_enc->disp_info.h_tile_instance[0];
++
++	if (dpu_enc->disp_info.intf_type != INTF_DP)
++		return false;
++
++	return msm_dp_get_dsc_config(priv->kms->dp[index], timing) != NULL;
++}
++
+ void dpu_encoder_update_topology(struct drm_encoder *drm_enc,
+ 				 struct msm_display_topology *topology,
+ 				 struct drm_atomic_commit *state,
+@@ -661,11 +705,10 @@ void dpu_encoder_update_topology(struct drm_encoder *drm_enc,
+ 	struct dpu_encoder_virt *dpu_enc = to_dpu_encoder_virt(drm_enc);
+ 	struct msm_drm_private *priv = dpu_enc->base.dev->dev_private;
+ 	struct msm_display_info *disp_info = &dpu_enc->disp_info;
+-	struct dpu_kms *dpu_kms = to_dpu_kms(priv->kms);
+ 	struct drm_connector *connector;
+ 	struct drm_connector_state *conn_state;
+ 	struct drm_framebuffer *fb;
+-	struct drm_dsc_config *dsc;
++	bool dsc_enabled;
+ 
+ 	int i;
+ 
+@@ -673,24 +716,22 @@ void dpu_encoder_update_topology(struct drm_encoder *drm_enc,
+ 		if (dpu_enc->phys_encs[i])
+ 			topology->num_intf++;
+ 
+-	dsc = dpu_encoder_get_dsc_config(drm_enc);
++	/*
++	 * DP chooses compression per mode, and only programs it in the
++	 * bridge pre-enable, so ask it about the mode being checked.
++	 */
++	if (disp_info->intf_type == INTF_DP)
++		dsc_enabled = msm_dp_dsc_enabled_for_mode(priv->kms->dp[disp_info->h_tile_instance[0]],
++							  adj_mode);
++	else
++		dsc_enabled = dpu_encoder_get_dsc_config(drm_enc) != NULL;
+ 
+-	/* We only support 2 DSC mode (with 2 LM and 1 INTF) */
+-	if (dsc) {
+-		/*
+-		 * Use 2 DSC encoders, 2 layer mixers and 1 or 2 interfaces
+-		 * when Display Stream Compression (DSC) is enabled,
+-		 * and when enough DSC blocks are available.
+-		 * This is power-optimal and can drive up to (including) 4k
+-		 * screens.
+-		 */
+-		WARN(topology->num_intf > 2,
+-		     "DSC topology cannot support more than 2 interfaces\n");
+-		if (topology->num_intf >= 2 || dpu_kms->catalog->dsc_count >= 2)
+-			topology->num_dsc = 2;
+-		else
+-			topology->num_dsc = 1;
+-	}
++	/*
++	 * Set DSC number as 1 to mark the enabled status, will be adjusted
++	 * in dpu_crtc_get_topology()
++	 */
++	if (dsc_enabled)
++		topology->num_dsc = 1;
+ 
+ 	connector = drm_atomic_get_new_connector_for_encoder(state, drm_enc);
+ 	if (!connector)
+@@ -1226,6 +1267,9 @@ static void dpu_encoder_virt_atomic_mode_set(struct drm_encoder *drm_enc,
+ 		dpu_enc->hw_dsc[i] = to_dpu_hw_dsc(hw_dsc[i]);
+ 		dsc_mask |= BIT(dpu_enc->hw_dsc[i]->idx - DSC_0);
+ 	}
++	/* a smaller topology must not inherit encoders from the previous mode */
++	for (i = num_dsc; i < MAX_CHANNELS_PER_ENC; i++)
++		dpu_enc->hw_dsc[i] = NULL;
+ 
+ 	dpu_enc->dsc_mask = dsc_mask;
+ 
+@@ -1342,6 +1386,7 @@ static void dpu_encoder_virt_atomic_enable(struct drm_encoder *drm_enc,
+ 
+ 	dpu_enc = to_dpu_encoder_virt(drm_enc);
+ 	dpu_enc->dsc = dpu_encoder_get_dsc_config(drm_enc);
++	dpu_enc->dsc_initial_lines = dpu_dsc_initial_lines;
+ 
+ 	atomic_set(&dpu_enc->frame_done_timeout_cnt, 0);
+ 
+@@ -1358,6 +1403,23 @@ static void dpu_encoder_virt_atomic_enable(struct drm_encoder *drm_enc,
+ 	trace_dpu_enc_enable(DRMID(drm_enc), cur_mode->hdisplay,
+ 			     cur_mode->vdisplay);
+ 
++	if (dpu_pp_fifo_lines) {
++		int i, num_pp = 0;
++
++		for (i = 0; i < MAX_CHANNELS_PER_ENC; i++)
++			if (dpu_enc->hw_pp[i])
++				num_pp++;
++		for (i = 0; i < num_pp; i++) {
++			if (!dpu_enc->hw_pp[i]->ops.set_fifo_size)
++				break;
++			dpu_enc->hw_pp[i]->ops.set_fifo_size(dpu_enc->hw_pp[i],
++				cur_mode->hdisplay * dpu_pp_fifo_lines / num_pp);
++			DPU_DEBUG("enc%d pp%d fifo %u pixels\n", DRMID(drm_enc),
++				  dpu_enc->hw_pp[i]->idx - PINGPONG_0,
++				  cur_mode->hdisplay * dpu_pp_fifo_lines / num_pp);
++		}
++	}
++
+ 	/* always enable slave encoder before master */
+ 	if (dpu_enc->cur_slave && dpu_enc->cur_slave->ops.enable)
+ 		dpu_enc->cur_slave->ops.enable(dpu_enc->cur_slave);
+@@ -1660,6 +1722,21 @@ static void _dpu_encoder_trigger_flush(struct drm_encoder *drm_enc,
+ 	if (extra_flush_bits && ctl->ops.update_pending_flush)
+ 		ctl->ops.update_pending_flush(ctl, extra_flush_bits);
+ 
++	/*
++	 * A compressed DP stream carries its PPS with the peripheral flush;
++	 * refresh the packet and request the flush on every frame, as the
++	 * vendor driver does.
++	 */
++	if (dpu_enc->dsc && phys->hw_intf &&
++	    phys->hw_intf->cap->type == INTF_DP &&
++	    ctl->ops.update_pending_flush_periph) {
++		struct msm_drm_private *priv = drm_enc->dev->dev_private;
++		int index = dpu_enc->disp_info.h_tile_instance[0];
++
++		msm_dp_dsc_update_pps(priv->kms->dp[index]);
++		ctl->ops.update_pending_flush_periph(ctl, phys->hw_intf->idx);
++	}
++
+ 	ctl->ops.trigger_flush(ctl);
+ 
+ 	if (ctl->ops.get_pending_flush)
+@@ -1987,6 +2064,69 @@ dpu_encoder_dsc_initial_line_calc(struct drm_dsc_config *dsc,
+ 	return DIV_ROUND_UP(total_pixels, dsc->slice_width);
+ }
+ 
++/*
++ * Initial line latency for the DSC 1.2 encoders (DPU 7 and later), from the
++ * vendor display driver. The encoder's output buffer and the sub-stream
++ * multiplexer add latency that grows with the slice chunk, so wide slices
++ * need more lines than the DSC 1.1 estimate below allows.
++ */
++static u32
++dpu_encoder_dsc_1_2_initial_line_calc(const struct drm_dsc_config *dsc,
++				      u32 dsc_common_mode,
++				      u32 num_active_ss_per_enc)
++{
++	const int rtl_max_bpc = 10, rtl_output_data_width = 64;
++	const int pipeline_latency = 28;
++	int bpc = dsc->bits_per_component;
++	int bpp = dsc->bits_per_pixel >> 4;
++	bool native_422 = dsc->native_422;
++	bool native_420 = dsc->native_420;
++	bool multiplex = dsc_common_mode & DSC_MODE_MULTIPLEX;
++	bool split_panel = dsc_common_mode & DSC_MODE_SPLIT_PANEL;
++	int max_muxword_size, max_se_size, max_ssm_delay, mux_word_size;
++	int compress_bpp_group, input_ssm_out_latency, rtl_num_components;
++	int ob_data_width, obuf_latency, base_hs_latency, chunk_bits;
++	int output_rate_ratio_complement, output_rate_extra_budget_bits;
++	int multi_hs_extra_budget_bits, multi_hs_extra_latency;
++	int container_slice_width;
++
++	container_slice_width = native_422 ? dsc->slice_width / 2 : dsc->slice_width;
++	max_muxword_size = (rtl_max_bpc >= 12) ? 64 : 48;
++	max_se_size = 4 * (rtl_max_bpc + 1);
++	max_ssm_delay = max_se_size + max_muxword_size - 1;
++	mux_word_size = (bpc >= 12) ? 64 : 48;
++	compress_bpp_group = native_422 ? (2 * bpp) : bpp;
++	input_ssm_out_latency = pipeline_latency +
++		3 * (max_ssm_delay + 2) * num_active_ss_per_enc;
++	rtl_num_components = (native_420 || native_422) ? 4 : 3;
++	if (rtl_num_components == 4)
++		ob_data_width = (rtl_output_data_width >= 2 * max_muxword_size) ?
++			rtl_output_data_width : 2 * rtl_output_data_width;
++	else
++		ob_data_width = (rtl_output_data_width >= max_muxword_size) ?
++			rtl_output_data_width : 2 * rtl_output_data_width;
++	obuf_latency = DIV_ROUND_UP(9 * ob_data_width + mux_word_size,
++				    compress_bpp_group) + 1;
++	base_hs_latency = dsc->initial_xmit_delay + input_ssm_out_latency +
++			  obuf_latency;
++	chunk_bits = 8 * dsc->slice_chunk_size;
++	output_rate_ratio_complement = ob_data_width - compress_bpp_group;
++	output_rate_extra_budget_bits =
++		(output_rate_ratio_complement * chunk_bits) >>
++		((ob_data_width == 128) ? 7 : 6);
++	if (split_panel && multiplex)
++		multi_hs_extra_budget_bits = chunk_bits;
++	else if (num_active_ss_per_enc > 1 && ob_data_width > compress_bpp_group)
++		multi_hs_extra_budget_bits = chunk_bits;
++	else
++		multi_hs_extra_budget_bits = output_rate_extra_budget_bits;
++	multi_hs_extra_latency = DIV_ROUND_UP(multi_hs_extra_budget_bits,
++					      compress_bpp_group);
++
++	return DIV_ROUND_UP(base_hs_latency + multi_hs_extra_latency,
++			    container_slice_width);
++}
++
+ static void dpu_encoder_dsc_pipe_cfg(struct dpu_hw_ctl *ctl,
+ 				     struct dpu_hw_dsc *hw_dsc,
+ 				     struct dpu_hw_pingpong *hw_pp,
+@@ -2003,6 +2143,9 @@ static void dpu_encoder_dsc_pipe_cfg(struct dpu_hw_ctl *ctl,
+ 	if (hw_pp->ops.setup_dsc)
+ 		hw_pp->ops.setup_dsc(hw_pp);
+ 
++	if (hw_pp->ops.setup_dsc_swap)
++		hw_pp->ops.setup_dsc_swap(hw_pp, dpu_dsc_pp_out_swap);
++
+ 	if (hw_dsc->ops.dsc_bind_pingpong_blk)
+ 		hw_dsc->ops.dsc_bind_pingpong_blk(hw_dsc, hw_pp->idx);
+ 
+@@ -2017,14 +2160,18 @@ static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
+ 				 struct drm_dsc_config *dsc)
+ {
+ 	struct dpu_encoder_phys *enc_master = dpu_enc->cur_master;
++	struct dpu_kms *dpu_kms = enc_master->dpu_kms;
+ 	struct dpu_hw_ctl *ctl = enc_master->hw_ctl;
+ 	struct dpu_hw_dsc *hw_dsc[MAX_CHANNELS_PER_ENC];
+ 	struct dpu_hw_pingpong *hw_pp[MAX_CHANNELS_PER_ENC];
++	struct drm_dsc_config dsc_half;
+ 	int this_frame_slices;
+ 	int intf_ip_w, enc_ip_w;
+ 	int dsc_common_mode;
+ 	int pic_width;
+ 	u32 initial_lines;
++	u32 padding = 0, alignment = 0;
++	bool dsc_merge, dsc_4hs_merge;
+ 	int num_dsc = 0;
+ 	int i;
+ 
+@@ -2040,23 +2187,81 @@ static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
+ 
+ 	pic_width = dsc->pic_width;
+ 
++	dsc_merge = dpu_encoder_use_dsc_merge(enc_master->parent);
++	/* four merged encoders: two pairs, each compressing half the picture */
++	dsc_4hs_merge = dsc_merge && num_dsc == 4;
++
+ 	dsc_common_mode = 0;
+ 	if (num_dsc > 1)
+ 		dsc_common_mode |= DSC_MODE_SPLIT_PANEL;
+-	if (dpu_encoder_use_dsc_merge(enc_master->parent))
++	if (dsc_merge)
+ 		dsc_common_mode |= DSC_MODE_MULTIPLEX;
++	if (dsc_4hs_merge)
++		dsc_common_mode |= DSC_MODE_4HS_MERGE;
+ 	if (enc_master->intf_mode == INTF_MODE_VIDEO)
+ 		dsc_common_mode |= DSC_MODE_VIDEO;
++	dsc_common_mode &= ~dpu_dsc_mode_clear;
+ 
+ 	this_frame_slices = pic_width / dsc->slice_width;
+ 	intf_ip_w = this_frame_slices * dsc->slice_width;
+ 
+-	enc_ip_w = intf_ip_w / num_dsc;
+-	initial_lines = dpu_encoder_dsc_initial_line_calc(dsc, enc_ip_w);
++	/*
++	 * Merged encoders share the stream, so each takes half of the
++	 * interface width; the initial line delay follows that split.
++	 */
++	if (dsc_merge)
++		enc_ip_w = intf_ip_w / 2;
++	else
++		enc_ip_w = intf_ip_w / num_dsc;
+ 
+-	for (i = 0; i < num_dsc; i++)
++	if (dpu_enc->dsc_initial_lines) {
++		initial_lines = dpu_enc->dsc_initial_lines;
++	} else if (dpu_kms->catalog->mdss_ver->core_major_ver >= 7) {
++		u32 ss_per_enc = dsc->slice_count;
++
++		if (dsc_4hs_merge)
++			ss_per_enc /= 4;
++		else if (dsc_merge)
++			ss_per_enc /= 2;
++		initial_lines = dpu_encoder_dsc_1_2_initial_line_calc(dsc, dsc_common_mode,
++								      max(ss_per_enc, 1U));
++	} else {
++		initial_lines = dpu_encoder_dsc_initial_line_calc(dsc, enc_ip_w);
++	}
++
++	if (dsc_4hs_merge) {
++		u32 pair_bytes = 2 * dsc->slice_chunk_size;
++
++		/*
++		 * Each pair operates on half the picture. The merged output
++		 * of a pair is padded to 8 bytes and then aligned to 16.
++		 */
++		dsc_half = *dsc;
++		dsc_half.pic_width = pic_width / 2;
++		dsc = &dsc_half;
++
++		if (pair_bytes % 8)
++			padding = 8 - pair_bytes % 8;
++		if ((pair_bytes + padding) % 16)
++			alignment = 16 - (pair_bytes + padding) % 16;
++	}
++
++	DPU_DEBUG("enc%d dsc: %d encoders mode 0x%x pic %ux%u slices %u of %u initial_lines %u padding %u alignment %u\n",
++		  DRMID(&dpu_enc->base), num_dsc, dsc_common_mode, dsc->pic_width, dsc->pic_height,
++		      dsc->slice_count, dsc->slice_width, initial_lines,
++		      padding, alignment);
++
++	for (i = 0; i < num_dsc; i++) {
+ 		dpu_encoder_dsc_pipe_cfg(ctl, hw_dsc[i], hw_pp[i],
+ 					 dsc, dsc_common_mode, initial_lines);
++
++		if (hw_dsc[i]->ops.dsc_config_4hsmerge)
++			hw_dsc[i]->ops.dsc_config_4hsmerge(hw_dsc[i], dsc_4hs_merge,
++							   dsc_common_mode,
++							   padding, alignment);
++		if (dpu_dsc_clear_int && hw_dsc[i]->ops.dsc_clear_int)
++			hw_dsc[i]->ops.dsc_clear_int(hw_dsc[i]);
++	}
+ }
+ 
+ /**
+@@ -2179,8 +2384,8 @@ static void dpu_encoder_helper_reset_mixers(struct dpu_encoder_phys *phys_enc)
+ {
+ 	int i, num_lm;
+ 	struct dpu_global_state *global_state;
+-	struct dpu_hw_blk *hw_lm[2];
+-	struct dpu_hw_mixer *hw_mixer[2];
++	struct dpu_hw_blk *hw_lm[MAX_CHANNELS_PER_ENC];
++	struct dpu_hw_mixer *hw_mixer[MAX_CHANNELS_PER_ENC];
+ 	struct dpu_hw_ctl *ctl = phys_enc->hw_ctl;
+ 
+ 	/* reset all mixers for this encoder */
+@@ -2222,6 +2427,9 @@ static void dpu_encoder_dsc_pipe_clr(struct dpu_hw_ctl *ctl,
+ 	if (hw_dsc->ops.dsc_disable)
+ 		hw_dsc->ops.dsc_disable(hw_dsc);
+ 
++	if (hw_dsc->ops.dsc_config_4hsmerge)
++		hw_dsc->ops.dsc_config_4hsmerge(hw_dsc, false, 0, 0, 0);
++
+ 	if (hw_pp->ops.disable_dsc)
+ 		hw_pp->ops.disable_dsc(hw_pp);
+ 
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys.h
+index 61b22d9494546885db609efa156222792af73d2a..37402736d5e14d128377b6d70b5366987915e63c 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys.h
+@@ -302,7 +302,7 @@ static inline enum dpu_3d_blend_mode dpu_encoder_helper_get_3d_blend_mode(
+ 
+ 	/* Use merge_3d unless DSC MERGE topology is used */
+ 	if (phys_enc->split_role == ENC_ROLE_SOLO &&
+-	    dpu_cstate->num_mixers == CRTC_DUAL_MIXERS &&
++	    (dpu_cstate->num_mixers != 1) &&
+ 	    !dpu_encoder_use_dsc_merge(phys_enc->parent))
+ 		return BLEND_3D_H_ROW_INT;
+ 
+@@ -315,6 +315,10 @@ unsigned int dpu_encoder_helper_get_dsc(struct dpu_encoder_phys *phys_enc);
+ 
+ struct drm_dsc_config *dpu_encoder_get_dsc_config(struct drm_encoder *drm_enc);
+ 
++struct msm_dp_dsc_intf_timing;
++bool dpu_encoder_get_dp_dsc_timing(struct drm_encoder *drm_enc,
++				   struct msm_dp_dsc_intf_timing *timing);
++
+ u32 dpu_encoder_get_drm_fmt(struct dpu_encoder_phys *phys_enc);
+ 
+ bool dpu_encoder_needs_periph_flush(struct dpu_encoder_phys *phys_enc);
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+index ba810f26ea3099106aac1783f7f6bf5e014e41a0..89e9cb5b538f8cc60ae1c81d1f887f1b6f915e97 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+@@ -46,6 +46,8 @@ static void drm_mode_to_intf_timing_params(
+ 		const struct drm_display_mode *mode,
+ 		struct dpu_hw_intf_timing_params *timing)
+ {
++	struct msm_dp_dsc_intf_timing dp_dsc = { 0 };
++
+ 	memset(timing, 0, sizeof(*timing));
+ 
+ 	if ((mode->htotal < mode->hsync_end)
+@@ -98,6 +100,16 @@ static void drm_mode_to_intf_timing_params(
+ 	timing->wide_bus_en = dpu_encoder_is_widebus_enabled(phys_enc->parent);
+ 	timing->compression_en = dpu_encoder_is_dsc_enabled(phys_enc->parent);
+ 
++	if (phys_enc->hw_intf->cap->type == INTF_DP && timing->compression_en) {
++		struct drm_dsc_config *dsc =
++			dpu_encoder_get_dsc_config(phys_enc->parent);
++
++		if (dsc)
++			timing->dce_bytes_per_line = msm_dsc_get_bytes_per_line(dsc);
++		if (!dpu_encoder_get_dp_dsc_timing(phys_enc->parent, &dp_dsc))
++			timing->compression_en = false;
++	}
++
+ 	/*
+ 	 *  For DP/EDP, Shift timings to align it to bottom right.
+ 	 *  wide_bus_en is set for everything excluding SDM845 &
+@@ -112,14 +124,32 @@ static void drm_mode_to_intf_timing_params(
+ 
+ 	/*
+ 	 * for DP, divide the horizonal parameters by 2 when
+-	 * widebus is enabled
++	 * widebus or compression is enabled
+ 	 */
+-	if (phys_enc->hw_intf->cap->type == INTF_DP && timing->wide_bus_en) {
+-		timing->width = timing->width >> 1;
+-		timing->xres = timing->xres >> 1;
+-		timing->h_back_porch = timing->h_back_porch >> 1;
+-		timing->h_front_porch = timing->h_front_porch >> 1;
+-		timing->hsync_pulse_width = timing->hsync_pulse_width >> 1;
++	if (phys_enc->hw_intf->cap->type == INTF_DP &&
++	    (timing->wide_bus_en || timing->compression_en)) {
++		u32 factor = timing->compression_en && dp_dsc.pclk_factor ? dp_dsc.pclk_factor : 2;
++
++		timing->width = timing->width / factor;
++		timing->xres = timing->xres / factor;
++		timing->h_back_porch = timing->h_back_porch / factor;
++		timing->h_front_porch = timing->h_front_porch / factor;
++		timing->hsync_pulse_width = timing->hsync_pulse_width / factor;
++
++		/*
++		 * The DP data throttle needs a few more clocks per line to
++		 * deliver every compressed byte; count them into the active
++		 * width and the back porch.
++		 */
++		if (timing->compression_en) {
++			timing->extra_dto_cycles = dp_dsc.extra_dto_cycles;
++			timing->width += dp_dsc.extra_disp_width;
++			timing->h_back_porch += dp_dsc.extra_disp_width;
++			DPU_DEBUG_VIDENC(phys_enc,
++					 "dp dsc timing: width %u xres %u hbp %u dce_bytes %u dto_cycles %u\n",
++					 timing->width, timing->xres, timing->h_back_porch,
++					 timing->dce_bytes_per_line, timing->extra_dto_cycles);
++		}
+ 	}
+ 
+ 	/*
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.h
+index f45faf87333e89bbd463504ae3219609ef6209bd..ba1554095a33940194ae553943941e4c158b6ac8 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.h
+@@ -24,7 +24,7 @@
+ #define DPU_MAX_IMG_WIDTH 0x3fff
+ #define DPU_MAX_IMG_HEIGHT 0x3fff
+ 
+-#define CRTC_DUAL_MIXERS	2
++#define CRTC_QUAD_MIXERS	4
+ 
+ #define MAX_XIN_COUNT 16
+ 
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc.h
+index 39d93b9df05150b6b63584605b48443650ab91f2..057ac0f4aca37a666f4526ba47f12b464339dbc9 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc.h
+@@ -12,6 +12,7 @@
+ #define DSC_MODE_SPLIT_PANEL            BIT(0)
+ #define DSC_MODE_MULTIPLEX              BIT(1)
+ #define DSC_MODE_VIDEO                  BIT(2)
++#define DSC_MODE_4HS_MERGE              BIT(3)
+ 
+ struct dpu_hw_dsc;
+ 
+@@ -38,6 +39,26 @@ struct dpu_hw_dsc_ops {
+ 			   u32 mode,
+ 			   u32 initial_lines);
+ 
++	/**
++	 * @dsc_config_4hsmerge: configure merging four DSC streams into one
++	 * @hw_dsc: Pointer to dsc context
++	 * @enable: Enable four-stream merging, or clear its configuration
++	 * @mode: dsc topology mode, including DSC_MODE_VIDEO for video mode
++	 * @padding: Bytes to pad a pair of DSC slices to an 8-byte boundary
++	 * @alignment: Additional bytes to align the padded pair to 16 bytes
++	 *
++	 * Available on DPU 9.0 and later. The caller must also configure the
++	 * four-encoder topology and each encoder's slice allocation, and clear
++	 * this configuration before reusing the DSC block for another topology.
++	 */
++	/**
++	 * @dsc_clear_int: clear the encoder interrupt status (bring-up knob)
++	 */
++	void (*dsc_clear_int)(struct dpu_hw_dsc *hw_dsc);
++
++	void (*dsc_config_4hsmerge)(struct dpu_hw_dsc *hw_dsc, bool enable,
++				  u32 mode, u32 padding, u32 alignment);
++
+ 	/**
+ 	 * @dsc_config_thresh: programs panel thresholds
+ 	 * @hw_dsc: Pointer to dsc context
+@@ -73,7 +94,8 @@ struct dpu_hw_dsc *dpu_hw_dsc_init(struct drm_device *dev,
+ 
+ struct dpu_hw_dsc *dpu_hw_dsc_init_1_2(struct drm_device *dev,
+ 				       const struct dpu_dsc_cfg *cfg,
+-				       void __iomem *addr);
++				       void __iomem *addr,
++				       const struct dpu_mdss_version *mdss_ver);
+ 
+ static inline struct dpu_hw_dsc *to_dpu_hw_dsc(struct dpu_hw_blk *hw)
+ {
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c
+index b3395e9c34a19363019ec0ccfb0c87943553b4c9..a05474f1ae685bf08bd844f2f49043668251f4a9 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c
+@@ -1,9 +1,10 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /*
+  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
+- * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved
++ * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved
+  */
+ 
++#include <linux/moduleparam.h>
+ #include <drm/drm_managed.h>
+ 
+ #include <drm/display/drm_dsc_helper.h>
+@@ -57,11 +58,24 @@
+ #define DSC_CFG                    0x04
+ #define DSC_DATA_IN_SWAP           0x08
+ #define DSC_CLK_CTRL               0x0C
++#define DSC_4HS_MERGE_EN           0x10
++#define DSC_4HS_MERGE_CFG          0x14
++
++static bool dpu_dsc_ich_reset_eol;
++module_param(dpu_dsc_ich_reset_eol, bool, 0644);
++MODULE_PARM_DESC(dpu_dsc_ich_reset_eol, "DSC: force the ICH reset at the end of every slice line (vendor override bits)");
++
++static unsigned int dpu_dsc_ob_max;
++module_param(dpu_dsc_ob_max, uint, 0644);
++MODULE_PARM_DESC(dpu_dsc_ob_max, "DSC: output buffer max address override (0: computed)");
+ 
+ static int _dsc_calc_output_buf_max_addr(struct dpu_hw_dsc *hw_dsc, int num_softslice)
+ {
+ 	int max_addr = 2400 / num_softslice;
+ 
++	if (dpu_dsc_ob_max)
++		return dpu_dsc_ob_max;
++
+ 	if (hw_dsc->caps->features & BIT(DPU_DSC_NATIVE_42x_EN))
+ 		max_addr /= 2;
+ 
+@@ -84,6 +98,34 @@ static void dpu_hw_dsc_disable_1_2(struct dpu_hw_dsc *hw_dsc)
+ 	DPU_REG_WRITE(hw, sblk->enc.base + DSC_MAIN_CONF, 0);
+ }
+ 
++static void dpu_hw_dsc_clear_int_1_2(struct dpu_hw_dsc *hw_dsc)
++{
++	struct dpu_hw_blk_reg_map *hw = &hw_dsc->hw;
++	u32 enc_base = hw_dsc->caps->sblk->enc.base;
++
++	DPU_REG_WRITE(hw, enc_base + ENC_INT_CLR, 0xffffffff);
++}
++
++static void dpu_hw_dsc_config_4hsmerge(struct dpu_hw_dsc *hw_dsc,
++				     bool enable, u32 mode,
++				     u32 padding, u32 alignment)
++{
++	struct dpu_hw_blk_reg_map *hw = &hw_dsc->hw;
++	u32 ctl_base = hw_dsc->caps->sblk->ctl.base;
++	u32 data = 0, en = 0;
++
++	if (enable) {
++		data = alignment << 12;
++		data |= padding << 8;
++		if (mode & DSC_MODE_VIDEO)
++			data |= BIT(0);
++		en = BIT(0);
++	}
++
++	DPU_REG_WRITE(hw, ctl_base + DSC_4HS_MERGE_CFG, data);
++	DPU_REG_WRITE(hw, ctl_base + DSC_4HS_MERGE_EN, en);
++}
++
+ static void dpu_hw_dsc_config_1_2(struct dpu_hw_dsc *hw_dsc,
+ 				  struct drm_dsc_config *dsc,
+ 				  u32 mode,
+@@ -110,7 +152,9 @@ static void dpu_hw_dsc_config_1_2(struct dpu_hw_dsc *hw_dsc,
+ 		data |= BIT(1);
+ 
+ 	num_active_slice_per_enc = dsc->slice_count;
+-	if (mode & DSC_MODE_MULTIPLEX)
++	if (mode & DSC_MODE_4HS_MERGE)
++		num_active_slice_per_enc = dsc->slice_count / 4;
++	else if (mode & DSC_MODE_MULTIPLEX)
+ 		num_active_slice_per_enc = dsc->slice_count / 2;
+ 
+ 	data |= (num_active_slice_per_enc & 0x3) << 7;
+@@ -122,6 +166,9 @@ static void dpu_hw_dsc_config_1_2(struct dpu_hw_dsc *hw_dsc,
+ 	if (mode & DSC_MODE_VIDEO)
+ 		data |= BIT(9);
+ 
++	if (dpu_dsc_ich_reset_eol)
++		data |= BIT(10) | BIT(11);
++
+ 	data |= (_dsc_calc_output_buf_max_addr(hw_dsc, num_active_slice_per_enc) << 18);
+ 
+ 	DPU_REG_WRITE(hw, sblk->enc.base + ENC_DF_CTRL, data);
+@@ -373,11 +420,13 @@ static void _setup_dcs_ops_1_2(struct dpu_hw_dsc_ops *ops)
+  * @dev:  Corresponding device for devres management
+  * @cfg:  DSC catalog entry for which driver object is required
+  * @addr: Mapped register io address of MDP
++ * @mdss_ver: MDSS hardware version
+  * Returns: Error code or allocated dpu_hw_dsc context
+  */
+ struct dpu_hw_dsc *dpu_hw_dsc_init_1_2(struct drm_device *dev,
+ 				       const struct dpu_dsc_cfg *cfg,
+-				       void __iomem *addr)
++				       void __iomem *addr,
++				       const struct dpu_mdss_version *mdss_ver)
+ {
+ 	struct dpu_hw_dsc *c;
+ 
+@@ -391,6 +440,9 @@ struct dpu_hw_dsc *dpu_hw_dsc_init_1_2(struct drm_device *dev,
+ 	c->idx = cfg->id;
+ 	c->caps = cfg;
+ 	_setup_dcs_ops_1_2(&c->ops);
++	if (mdss_ver->core_major_ver >= 9)
++		c->ops.dsc_config_4hsmerge = dpu_hw_dsc_config_4hsmerge;
++	c->ops.dsc_clear_int = dpu_hw_dsc_clear_int_1_2;
+ 
+ 	return c;
+ }
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c
+index ac82b69aedf6b325f7beedd1ea06ffda414cbe38..15bed57e01c9eefca7d3c45a1fdd61538a3d9991 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c
+@@ -188,7 +188,7 @@ static void dpu_hw_intf_setup_timing_engine(struct dpu_hw_intf *intf,
+ 	 * For the compression mode in DP case, the p->width is already
+ 	 * adjusted in drm_mode_to_intf_timing_params().
+ 	 */
+-	if (p->compression_en && !dp_intf) {
++	if (p->compression_en) {
+ 		if (p->wide_bus_en)
+ 			data_width = DIV_ROUND_UP(p->dce_bytes_per_line, 6);
+ 		else
+@@ -197,8 +197,7 @@ static void dpu_hw_intf_setup_timing_engine(struct dpu_hw_intf *intf,
+ 		data_width = p->width >> 1;
+ 	}
+ 
+-	/* TODO: handle DSC+DP case, we only handle DSC+DSI case so far */
+-	if (p->compression_en && !dp_intf &&
++	if (p->compression_en &&
+ 	    intf->mdss_ver->core_major_ver >= 7)
+ 		intf_cfg2 |= INTF_CFG2_DCE_DATA_COMPRESS;
+ 
+@@ -221,6 +220,16 @@ static void dpu_hw_intf_setup_timing_engine(struct dpu_hw_intf *intf,
+ 		display_hctl = active_hctl;
+ 
+ 		intf_cfg |= INTF_CFG_ACTIVE_H_EN | INTF_CFG_ACTIVE_V_EN;
++
++		/*
++		 * Compressed data is valid for the data clocks the DP data
++		 * throttle counts, starting at the active edge.
++		 */
++		if (p->compression_en) {
++			active_data_hctl = (hsync_start_x + p->extra_dto_cycles) << 16;
++			active_data_hctl |= hsync_start_x;
++			display_data_hctl = active_data_hctl;
++		}
+ 	}
+ 
+ 	den_polarity = 0;
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h
+index badd26305fc9456c1e794466c45e6f2e09cf519f..f11735ae6405c41e9575a9fab37dea8d76021b37 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h
+@@ -36,6 +36,7 @@ struct dpu_hw_intf_timing_params {
+ 	bool wide_bus_en;
+ 	bool compression_en;
+ 	u32 dce_bytes_per_line;
++	u32 extra_dto_cycles;	/* DP: data clocks per line, from zero */
+ };
+ 
+ struct dpu_hw_intf_prog_fetch {
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_mdss.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_mdss.h
+index 0e65bf5ddc4a6a7321c11b7aeba9a10bdc87eeb8..fd1f3e7982062ed7726c1ef4e12e58758dbe0692 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_mdss.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_mdss.h
+@@ -34,7 +34,7 @@
+ #define DPU_MAX_PLANES			4
+ #endif
+ 
+-#define STAGES_PER_PLANE		1
++#define STAGES_PER_PLANE		2
+ #define PIPES_PER_STAGE			2
+ #define PIPES_PER_PLANE			(PIPES_PER_STAGE * STAGES_PER_PLANE)
+ #ifndef DPU_MAX_DE_CURVES
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_pingpong.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_pingpong.c
+index 138071be56496da9fdcaff902f68ebb09a212e2e..9595e1c9ac28e3747b47f9f05298963f827a8f02 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_pingpong.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_pingpong.c
+@@ -9,6 +9,7 @@
+ #include "dpu_hw_mdss.h"
+ #include "dpu_hwio.h"
+ #include "dpu_hw_catalog.h"
++#include <linux/moduleparam.h>
+ #include "dpu_hw_pingpong.h"
+ #include "dpu_kms.h"
+ #include "dpu_trace.h"
+@@ -33,6 +34,8 @@
+ #define PP_DSC_MODE                     0x0a0
+ #define PP_DCE_DATA_IN_SWAP             0x0ac
+ #define PP_DCE_DATA_OUT_SWAP            0x0c8
++#define PP_FIFO_SIZE_CFG                0x01c
++#define PP_FIFO_PIXELS_PER_ENTRY        4
+ 
+ #define PP_DITHER_EN			0x000
+ #define PP_DITHER_BITDEPTH		0x004
+@@ -272,6 +275,32 @@ static void dpu_hw_pp_dsc_disable(struct dpu_hw_pingpong *pp)
+ 	DPU_REG_WRITE(c, PP_DSC_MODE, 0);
+ }
+ 
++/* Bring-up: byte-swap the compressed output of the pingpong (DPU 7+) */
++bool dpu_dsc_pp_out_swap;
++module_param(dpu_dsc_pp_out_swap, bool, 0644);
++MODULE_PARM_DESC(dpu_dsc_pp_out_swap, "DSC: endian flip on the pingpong compressed output");
++
++static void dpu_hw_pp_setup_dsc_swap(struct dpu_hw_pingpong *pp, bool enable)
++{
++	struct dpu_hw_blk_reg_map *pp_c = &pp->hw;
++	int data;
++
++	data = DPU_REG_READ(pp_c, PP_DCE_DATA_OUT_SWAP);
++	if (enable)
++		data |= BIT(18); /* endian flip */
++	else
++		data &= ~BIT(18);
++	DPU_REG_WRITE(pp_c, PP_DCE_DATA_OUT_SWAP, data);
++}
++
++static void dpu_hw_pp_set_fifo_size(struct dpu_hw_pingpong *pp, u32 pixels)
++{
++	struct dpu_hw_blk_reg_map *pp_c = &pp->hw;
++
++	DPU_REG_WRITE(pp_c, PP_FIFO_SIZE_CFG,
++		      (pixels / PP_FIFO_PIXELS_PER_ENTRY) & 0xfff);
++}
++
+ static int dpu_hw_pp_setup_dsc(struct dpu_hw_pingpong *pp)
+ {
+ 	struct dpu_hw_blk_reg_map *pp_c = &pp->hw;
+@@ -323,8 +352,14 @@ struct dpu_hw_pingpong *dpu_hw_pingpong_init(struct drm_device *dev,
+ 		c->ops.setup_dsc = dpu_hw_pp_setup_dsc;
+ 		c->ops.enable_dsc = dpu_hw_pp_dsc_enable;
+ 		c->ops.disable_dsc = dpu_hw_pp_dsc_disable;
++	} else {
++		c->ops.setup_dsc_swap = dpu_hw_pp_setup_dsc_swap;
+ 	}
+ 
++	/* the tear-check registers moved to the interface; 0x1c is the FIFO size */
++	if (mdss_rev->core_major_ver >= 12)
++		c->ops.set_fifo_size = dpu_hw_pp_set_fifo_size;
++
+ 	if (mdss_rev->core_major_ver >= 3)
+ 		c->ops.setup_dither = dpu_hw_pp_setup_dither;
+ 
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_pingpong.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_pingpong.h
+index effd012d864afb6af4933e7dcd28102ecd432a01..11e6a3866495eff5342bbcd9cd93c334bc1e9d5b 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_pingpong.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_pingpong.h
+@@ -91,6 +91,16 @@ struct dpu_hw_pingpong_ops {
+ 	 * @setup_dsc: Setup DSC
+ 	 */
+ 	int (*setup_dsc)(struct dpu_hw_pingpong *pp);
++
++	/**
++	 * @setup_dsc_swap: byte-swap the compressed output (bring-up knob)
++	 */
++	void (*setup_dsc_swap)(struct dpu_hw_pingpong *pp, bool enable);
++
++	/**
++	 * @set_fifo_size: size the pingpong buffer FIFO in pixels (DPU 12+)
++	 */
++	void (*set_fifo_size)(struct dpu_hw_pingpong *pp, u32 pixels);
+ };
+ 
+ struct dpu_hw_merge_3d;
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_top.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_top.c
+index 1ebd75d4f9be8d85e1591d11b5227b87da84e307..0be29e88e707f31ee64702ca39a18fc090bd3b6b 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_top.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_top.c
+@@ -22,6 +22,18 @@
+ #define TRAFFIC_SHAPER_WR_CLIENT(num)     (0x060 + (num * 4))
+ #define TRAFFIC_SHAPER_FIXPOINT_FACTOR    4
+ 
++#define MDP_DP_USB4_MUX 0x464
++#define MDP_DP_USB4_MUX_DP0_MASK 0x3
++
++void dpu_hw_setup_usb4_dp_route(struct dpu_hw_mdp *mdp, u32 resource)
++{
++	struct dpu_hw_blk_reg_map *c = &mdp->hw;
++	u32 val = DPU_REG_READ(c, MDP_DP_USB4_MUX);
++
++	DPU_REG_WRITE(c, MDP_DP_USB4_MUX,
++		      (val & ~MDP_DP_USB4_MUX_DP0_MASK) | resource);
++}
++
+ static void dpu_hw_setup_split_pipe(struct dpu_hw_mdp *mdp,
+ 		struct split_pipe_cfg *cfg)
+ {
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_top.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_top.h
+index 80279d87c2cde9904a4b4fbdc39c7771d912d841..7d3b986e85b3388029e76792f110109fc129edc8 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_top.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_top.h
+@@ -156,6 +156,9 @@ struct dpu_hw_mdp {
+ 	struct dpu_hw_mdp_ops ops;
+ };
+ 
++/* Caller must hold the DPU runtime-PM reference; Glymur DP0 only. */
++void dpu_hw_setup_usb4_dp_route(struct dpu_hw_mdp *mdp, u32 resource);
++
+ struct dpu_hw_mdp *dpu_hw_mdptop_init(struct drm_device *dev,
+ 				      const struct dpu_mdp_cfg *cfg,
+ 				      void __iomem *addr,
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+index da3556eb6ecc25a53440787dd35ab79f7e887545..0cfb38d364b22000949076bc26cb0ef2422762fc 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+@@ -1066,8 +1066,45 @@ static void dpu_kms_mdp_snapshot(struct msm_disp_state *disp_state, struct msm_k
+ 	pm_runtime_put_sync(&dpu_kms->pdev->dev);
+ }
+ 
++static void dpu_kms_restore_usb4_dp_route(struct dpu_kms *dpu_kms)
++{
++	mutex_lock(&dpu_kms->usb4_route_lock);
++	if (dpu_kms->usb4_dp_route_valid && dpu_kms->hw_mdp) {
++		dpu_hw_setup_usb4_dp_route(dpu_kms->hw_mdp, dpu_kms->usb4_dp_route);
++		dev_info(&dpu_kms->pdev->dev, "USB4 DP route restored: resource=%u\n",
++			 dpu_kms->usb4_dp_route);
++	}
++	mutex_unlock(&dpu_kms->usb4_route_lock);
++}
++
++static int dpu_kms_set_usb4_dp_route(struct msm_kms *kms, unsigned int resource)
++{
++	struct dpu_kms *dpu_kms = to_dpu_kms(kms);
++	struct device *dev = &dpu_kms->pdev->dev;
++	int ret;
++
++	if (resource > 3)
++		return -EINVAL;
++	if (!of_device_is_compatible(dev->of_node, "qcom,glymur-dpu") ||
++	    !dpu_kms->hw_mdp)
++		return -EOPNOTSUPP;
++
++	/* Resume before locking: the resume callback restores the cached route. */
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return ret;
++	mutex_lock(&dpu_kms->usb4_route_lock);
++	dpu_kms->usb4_dp_route = resource;
++	dpu_kms->usb4_dp_route_valid = true;
++	dpu_hw_setup_usb4_dp_route(dpu_kms->hw_mdp, resource);
++	mutex_unlock(&dpu_kms->usb4_route_lock);
++	pm_runtime_put_sync(dev);
++	return 0;
++}
++
+ static const struct msm_kms_funcs kms_funcs = {
+ 	.hw_init         = dpu_kms_hw_init,
++	.set_usb4_dp_route = dpu_kms_set_usb4_dp_route,
+ 	.irq_preinstall  = dpu_core_irq_preinstall,
+ 	.irq_postinstall = dpu_irq_postinstall,
+ 	.irq_uninstall   = dpu_core_irq_uninstall,
+@@ -1391,6 +1428,7 @@ static int dpu_dev_probe(struct platform_device *pdev)
+ 		return -ENOMEM;
+ 
+ 	dpu_kms->pdev = pdev;
++	mutex_init(&dpu_kms->usb4_route_lock);
+ 
+ 	ret = devm_pm_opp_set_clkname(dev, "core");
+ 	if (ret)
+@@ -1464,6 +1502,7 @@ static int __maybe_unused dpu_runtime_resume(struct device *dev)
+ 	}
+ 
+ 	dpu_vbif_init_memtypes(dpu_kms);
++	dpu_kms_restore_usb4_dp_route(dpu_kms);
+ 
+ 	drm_for_each_encoder(encoder, ddev)
+ 		dpu_encoder_virt_runtime_resume(encoder);
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h
+index e39831a397b165064f561e18a14b4ce0ec24e7fc..d66042fd933349fb7dacb49bf0753d92b5e41ab6 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h
+@@ -84,6 +84,11 @@ struct dpu_kms {
+ 	struct dpu_hw_vbif *hw_vbif;
+ 	struct dpu_hw_mdp *hw_mdp;
+ 
++	/* Desired DP-IN route, restored after the MDP power domain resumes. */
++	struct mutex usb4_route_lock;
++	u32 usb4_dp_route;
++	bool usb4_dp_route_valid;
++
+ 	bool has_danger_ctrl;
+ 
+ 	struct platform_device *pdev;
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c
+index 7b92082d35a642dfa3c4bd0016700b31cd9e8e26..6ded70141c69b8d49b794172dcc59583c7e2a72f 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c
+@@ -883,6 +883,9 @@ static int dpu_plane_split(struct drm_plane *plane,
+ 	u32 num_lm;
+ 	int stage_id, num_stages;
+ 
++	/* Rebuild all derived rectangles: a modeset can use fewer mixer pairs. */
++	memset(pstate->pipe_cfg, 0, sizeof(pstate->pipe_cfg));
++
+ 	max_linewidth = pdpu->catalog->caps->max_linewidth;
+ 
+ 	/* In non-virtual plane case, one mixer pair is always needed. */
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_rm.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_rm.c
+index 7e77d88f895920cf2b755ba22cf2cc1f69b91452..1a1e20d64b66d7e6502fa99d8848a34154afb3e2 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_rm.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_rm.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #define pr_fmt(fmt)	"[drm:%s] " fmt, __func__
++#include <linux/moduleparam.h>
+ #include "dpu_kms.h"
+ #include "dpu_hw_lm.h"
+ #include "dpu_hw_ctl.h"
+@@ -169,7 +170,7 @@ int dpu_rm_init(struct drm_device *dev,
+ 		const struct dpu_dsc_cfg *dsc = &cat->dsc[i];
+ 
+ 		if (cat->mdss_ver->core_major_ver >= 7)
+-			hw = dpu_hw_dsc_init_1_2(dev, dsc, mmio);
++			hw = dpu_hw_dsc_init_1_2(dev, dsc, mmio, cat->mdss_ver);
+ 		else
+ 			hw = dpu_hw_dsc_init(dev, dsc, mmio, cat->mdss_ver);
+ 
+@@ -556,6 +557,11 @@ static int _dpu_rm_dsc_alloc(struct dpu_rm *rm,
+ 	return 0;
+ }
+ 
++/* Bring-up: start the DSC pair search at the pingpong's own index */
++bool dpu_dsc_match_pp;
++module_param(dpu_dsc_match_pp, bool, 0644);
++MODULE_PARM_DESC(dpu_dsc_match_pp, "DSC: pair DSC encoders with the pingpongs of the same index");
++
+ static int _dpu_rm_dsc_alloc_pair(struct dpu_rm *rm,
+ 				  struct dpu_global_state *global_state,
+ 				  uint32_t crtc_id,
+@@ -565,8 +571,17 @@ static int _dpu_rm_dsc_alloc_pair(struct dpu_rm *rm,
+ 	int dsc_idx, pp_idx = 0;
+ 	int ret;
+ 
++	int first_dsc = 0;
++
++	if (dpu_dsc_match_pp) {
++		int first_pp = _dpu_rm_pingpong_next_index(global_state, 0, crtc_id);
++
++		if (first_pp >= 0)
++			first_dsc = first_pp & ~1;
++	}
++
+ 	/* only start from even dsc index */
+-	for (dsc_idx = 0; dsc_idx < ARRAY_SIZE(rm->dsc_blks) &&
++	for (dsc_idx = first_dsc; dsc_idx < ARRAY_SIZE(rm->dsc_blks) &&
+ 	     num_dsc < top->num_dsc; dsc_idx += 2) {
+ 		if (!rm->dsc_blks[dsc_idx] ||
+ 		    !rm->dsc_blks[dsc_idx + 1])
+diff --git a/drivers/gpu/drm/msm/msm_drv.h b/drivers/gpu/drm/msm/msm_drv.h
+index eb4bbae8557b6fa23bfb866d2a90502565b7fca0..1df38acfed8ff6006ac04dd42db1cb02f4a38b8c 100644
+--- a/drivers/gpu/drm/msm/msm_drv.h
++++ b/drivers/gpu/drm/msm/msm_drv.h
+@@ -358,6 +358,19 @@ bool msm_dp_needs_periph_flush(const struct msm_dp *dp_display,
+ 			       const struct drm_display_mode *mode);
+ bool msm_dp_wide_bus_available(const struct msm_dp *dp_display);
+ 
++/* Extra interface timing the DP driver derives for a compressed stream */
++struct msm_dp_dsc_intf_timing {
++	u32 extra_dto_cycles;	/* data clocks per line, counted from zero */
++	u32 extra_disp_width;	/* clocks added to the active width */
++	u32 pclk_factor;	/* pixels per clock on the interface: 2 or 4 */
++};
++
++struct drm_dsc_config *msm_dp_get_dsc_config(struct msm_dp *dp_display,
++					    struct msm_dp_dsc_intf_timing *timing);
++bool msm_dp_dsc_enabled_for_mode(const struct msm_dp *dp_display,
++				 const struct drm_display_mode *mode);
++void msm_dp_dsc_update_pps(struct msm_dp *dp_display);
++
+ #else
+ static inline int __init msm_dp_register(void)
+ {
+@@ -389,6 +402,24 @@ static inline bool msm_dp_wide_bus_available(const struct msm_dp *dp_display)
+ 	return false;
+ }
+ 
++struct msm_dp_dsc_intf_timing;
++
++static inline struct drm_dsc_config *
++msm_dp_get_dsc_config(struct msm_dp *dp_display, struct msm_dp_dsc_intf_timing *timing)
++{
++	return NULL;
++}
++
++static inline bool msm_dp_dsc_enabled_for_mode(const struct msm_dp *dp_display,
++					       const struct drm_display_mode *mode)
++{
++	return false;
++}
++
++static inline void msm_dp_dsc_update_pps(struct msm_dp *dp_display)
++{
++}
++
+ #endif
+ 
+ #ifdef CONFIG_DRM_MSM_MDP4
+diff --git a/drivers/gpu/drm/msm/msm_kms.h b/drivers/gpu/drm/msm/msm_kms.h
+index f25b31e502d2189d6f87a718d4fcf94bbd3c5a41..8a939766d5fe30df5b09b61f3d53333fcb323340 100644
+--- a/drivers/gpu/drm/msm/msm_kms.h
++++ b/drivers/gpu/drm/msm/msm_kms.h
+@@ -23,6 +23,8 @@
+  * for constructing the appropriate planes/crtcs/encoders/connectors.
+  */
+ struct msm_kms_funcs {
++	/* Optional DP-IN routing, including power-domain state restoration. */
++	int (*set_usb4_dp_route)(struct msm_kms *kms, unsigned int resource);
+ 	/* hw initialization: */
+ 	int (*hw_init)(struct msm_kms *kms);
+ 	/* irq handling: */

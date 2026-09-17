@@ -1,0 +1,96 @@
+--- a/drivers/thunderbolt/nhi.c
++++ b/drivers/thunderbolt/nhi.c
+@@ -575,7 +575,7 @@
+ 	ring->start_poll = start_poll;
+ 	ring->poll_data = poll_data;
+ 
+-	ring->descriptors = dma_alloc_coherent(ring->nhi->dev,
++	ring->descriptors = dma_alloc_coherent(ring->nhi->dma_dev,
+ 					       size * sizeof(*ring->descriptors),
+ 					       &ring->descriptors_dma, GFP_KERNEL | __GFP_ZERO);
+ 	if (!ring->descriptors)
+@@ -595,7 +595,7 @@
+ 	if (nhi->ops->release_ring_irq)
+ 		nhi->ops->release_ring_irq(ring);
+ err_free_descs:
+-	dma_free_coherent(ring->nhi->dev,
++	dma_free_coherent(ring->nhi->dma_dev,
+ 			  ring->size * sizeof(*ring->descriptors),
+ 			  ring->descriptors, ring->descriptors_dma);
+ err_free_ring:
+@@ -831,7 +831,7 @@
+ 	if (nhi->ops->release_ring_irq)
+ 		nhi->ops->release_ring_irq(ring);
+ 
+-	dma_free_coherent(ring->nhi->dev,
++	dma_free_coherent(ring->nhi->dma_dev,
+ 			  ring->size * sizeof(*ring->descriptors),
+ 			  ring->descriptors, ring->descriptors_dma);
+ 
+@@ -1259,6 +1259,9 @@
+ 	if (!nhi->ops->init_interrupts)
+ 		return dev_err_probe(dev, -EINVAL, "missing required NHI ops\n");
+ 
++	if (!nhi->dma_dev)
++		nhi->dma_dev = dev;
++
+ 	nhi->hop_count = ioread32(nhi->iobase + REG_CAPS) & 0x3ff;
+ 	dev_dbg(dev, "total paths: %d\n", nhi->hop_count);
+ 
+--- a/drivers/thunderbolt/nhi.h
++++ b/drivers/thunderbolt/nhi.h
+@@ -34,7 +34,12 @@
+ void nhi_interrupt_work(struct work_struct *work);
+ irqreturn_t nhi_msi(int irq, void *data);
+ irqreturn_t ring_msix(int irq, void *data);
+-/* The caller must configure streaming and coherent DMA masks before probing. */
++/*
++ * The caller must configure streaming and coherent DMA masks on dma_dev
++ * (or dev when dma_dev is NULL) before probing. Keep the DMA device, its
++ * DMA configuration and IOMMU attachment valid until all users are drained
++ * and nhi_remove() has returned. Do not change dma_dev while users are active.
++ */
+ int nhi_probe(struct tb_nhi *nhi);
+ void nhi_remove(struct tb_nhi *nhi);
+ void nhi_shutdown(struct tb_nhi *nhi);
+--- a/drivers/thunderbolt/ctl.c
++++ b/drivers/thunderbolt/ctl.c
+@@ -666,7 +666,7 @@
+ 
+ 	mutex_init(&ctl->request_queue_lock);
+ 	INIT_LIST_HEAD(&ctl->request_queue);
+-	ctl->frame_pool = dma_pool_create("thunderbolt_ctl", nhi->dev,
++	ctl->frame_pool = dma_pool_create("thunderbolt_ctl", nhi->dma_dev,
+ 					  TB_FRAME_SIZE, 4, 0);
+ 	if (!ctl->frame_pool)
+ 		goto err;
+--- a/include/linux/thunderbolt.h
++++ b/include/linux/thunderbolt.h
+@@ -502,6 +502,10 @@
+  * @lock: Must be held during ring creation/destruction. Is acquired by
+  *	  interrupt_work when dispatching interrupts to individual rings.
+  * @dev: Device associated with this NHI instance
++ * @dma_dev: Device used for DMA allocations and mappings. If NULL, nhi_probe()
++ *	   uses @dev. The caller must keep this device and its DMA configuration
++ *	   valid until all users are drained and NHI teardown has completed.
++ *	   Must not change while users are active.
+  * @ops: NHI specific optional ops
+  * @iobase: MMIO space of the NHI
+  * @tx_rings: All Tx rings available on this host controller
+@@ -523,6 +527,7 @@
+ struct tb_nhi {
+ 	spinlock_t lock;
+ 	struct device *dev;
++	struct device *dma_dev;
+ 	const struct tb_nhi_ops *ops;
+ 	void __iomem *iobase;
+ 	struct tb_ring **tx_rings;
+@@ -731,7 +736,7 @@
+  */
+ static inline struct device *tb_ring_dma_device(struct tb_ring *ring)
+ {
+-	return ring->nhi->dev;
++	return ring->nhi->dma_dev;
+ }
+ 
+ bool usb4_usb3_port_match(struct device *usb4_port_dev,

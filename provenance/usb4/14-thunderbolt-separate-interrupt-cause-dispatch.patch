@@ -1,0 +1,108 @@
+--- a/drivers/thunderbolt/nhi.c
++++ b/drivers/thunderbolt/nhi.c
+@@ -930,52 +930,65 @@
+ 	return (enum nhi_fw_mode)val;
+ }
+ 
++/**
++ * nhi_handle_interrupt() - Dispatch one captured interrupt cause
++ * @nhi: NHI that reported the cause
++ * @cause: Bit index in the TX, RX and RX overflow status fields
++ *
++ * The caller must hold @nhi->lock. This does not read or acknowledge the
++ * interrupt status. Polling rings retain their normal interrupt masking.
++ */
++void nhi_handle_interrupt(struct tb_nhi *nhi, unsigned int cause)
++{
++	struct tb_ring *ring;
++	int hop, type;
++
++	lockdep_assert_held(&nhi->lock);
++	if (WARN_ON_ONCE(cause >= 3 * nhi->hop_count))
++		return;
++
++	type = cause / nhi->hop_count;
++	hop = cause % nhi->hop_count;
++	if (type == 2) {
++		dev_warn(nhi->dev, "RX overflow for ring %d\n", hop);
++		return;
++	}
++	if (type == 0)
++		ring = nhi->tx_rings[hop];
++	else
++		ring = nhi->rx_rings[hop];
++	if (ring == NULL) {
++		dev_warn(nhi->dev,
++			 "got interrupt for inactive %s ring %d\n",
++			 type ? "RX" : "TX", hop);
++		return;
++	}
++
++	spin_lock(&ring->lock);
++	__ring_interrupt(ring);
++	spin_unlock(&ring->lock);
++}
++
+ void nhi_interrupt_work(struct work_struct *work)
+ {
+ 	struct tb_nhi *nhi = container_of(work, typeof(*nhi), interrupt_work);
+-	int value = 0; /* Suppress uninitialized usage warning. */
++	u32 value = 0;
+ 	int bit;
+-	int hop = -1;
+-	int type = 0; /* current interrupt type 0: TX, 1: RX, 2: RX overflow */
+-	struct tb_ring *ring;
+ 
+ 	spin_lock_irq(&nhi->lock);
+ 
+ 	/*
+ 	 * Starting at REG_RING_NOTIFY_BASE there are three status bitfields
+ 	 * (TX, RX, RX overflow). We iterate over the bits and read a new
+-	 * dwords as required. The registers are cleared on read.
++	 * dword as required. The registers are cleared on read.
+ 	 */
+ 	for (bit = 0; bit < 3 * nhi->hop_count; bit++) {
+ 		if (bit % 32 == 0)
+ 			value = ioread32(nhi->iobase
+ 					 + REG_RING_NOTIFY_BASE
+ 					 + 4 * (bit / 32));
+-		if (++hop == nhi->hop_count) {
+-			hop = 0;
+-			type++;
+-		}
+-		if ((value & (1 << (bit % 32))) == 0)
+-			continue;
+-		if (type == 2) {
+-			dev_warn(nhi->dev, "RX overflow for ring %d\n", hop);
+-			continue;
+-		}
+-		if (type == 0)
+-			ring = nhi->tx_rings[hop];
+-		else
+-			ring = nhi->rx_rings[hop];
+-		if (ring == NULL) {
+-			dev_warn(nhi->dev,
+-				 "got interrupt for inactive %s ring %d\n",
+-				 type ? "RX" : "TX",
+-				 hop);
+-			continue;
+-		}
+-
+-		spin_lock(&ring->lock);
+-		__ring_interrupt(ring);
+-		spin_unlock(&ring->lock);
++		if (value & BIT(bit % 32))
++			nhi_handle_interrupt(nhi, bit);
+ 	}
+ 	spin_unlock_irq(&nhi->lock);
+ }
+--- a/drivers/thunderbolt/nhi.h
++++ b/drivers/thunderbolt/nhi.h
+@@ -31,6 +31,7 @@
+ enum nhi_fw_mode nhi_mailbox_mode(struct tb_nhi *nhi);
+ void nhi_enable_int_throttling(struct tb_nhi *nhi);
+ void nhi_disable_interrupts(struct tb_nhi *nhi);
++void nhi_handle_interrupt(struct tb_nhi *nhi, unsigned int cause);
+ void nhi_interrupt_work(struct work_struct *work);
+ irqreturn_t nhi_msi(int irq, void *data);
+ irqreturn_t ring_msix(int irq, void *data);

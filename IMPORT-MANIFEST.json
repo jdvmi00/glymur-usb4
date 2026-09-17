@@ -1,0 +1,440 @@
+{
+  "schema": 3,
+  "source_project": "surface-laptop-8",
+  "source_commit": "5a1b08350e42f45f83e32cdf07ace463f6cace0b",
+  "purpose": "Reproducible experimental USB4/6K60 source; not an installation release",
+  "files": [
+    {
+      "path": "reproduce/kernel.config",
+      "sha256": "0b4cf8047876465235ebd9902a167e3e02ab279a6e2e01734a8b3c2dad0f759d",
+      "source_path": "kernel/checkpoint-1.73/checkpoint.config"
+    },
+    {
+      "path": "provenance/display/0040-drm-msm-dpu-Enable-quad-pipe-for-DSC-and-dual-DSI-ca.patch",
+      "sha256": "24eaee24ad3ec5217d27fc080345bb16b2c1b654df765d1a25d365cedc212939",
+      "source_path": "kernel/checkpoint-1.73/provenance/0040-drm-msm-dpu-Enable-quad-pipe-for-DSC-and-dual-DSI-ca.patch"
+    },
+    {
+      "path": "provenance/display/usb4-candidate-1.65-vs-1.64.diff",
+      "sha256": "f81299a869c4975ce8dd24455c45807ddd06b9cb4ca4e2a88b363b8bd1b41c0c",
+      "source_path": "kernel/checkpoint-1.73/provenance/usb4-candidate-1.65-vs-1.64.diff"
+    },
+    {
+      "path": "provenance/display/usb4-candidate-1.66-vs-1.65.diff",
+      "sha256": "d54f915d307f7a93ae0827a8ce6d869fbc1ffc3d3cbec9e440a5ec7884f61597",
+      "source_path": "kernel/checkpoint-1.73/provenance/usb4-candidate-1.66-vs-1.65.diff"
+    },
+    {
+      "path": "provenance/display/usb4-candidate-1.70-vs-1.66.diff",
+      "sha256": "90046b827192b3d58b0540366f8fa57c246d40fc56c9f3f755e636812d1275c9",
+      "source_path": "kernel/checkpoint-1.73/provenance/usb4-candidate-1.70-vs-1.66.diff"
+    },
+    {
+      "path": "reproduce/expected-source.sha256",
+      "sha256": "d28f15bec61110c6af6058586cb51cf0d1fbbdc20a5ee31781792992ff3e60e0",
+      "source_path": "kernel/install-candidate-1.85/expected-source.sha256"
+    },
+    {
+      "path": "reproduce/baseline/0001-net-smsc95xx-Allow-mac-address-to-be-set-as-a-parame.patch",
+      "sha256": "08d6df663c0cccb92c63886a71819dcb1c33e7996d5a54be3d81f46b3d7386a3",
+      "source_path": "kernel/linux-aarch64/0001-net-smsc95xx-Allow-mac-address-to-be-set-as-a-parame.patch"
+    },
+    {
+      "path": "reproduce/baseline/0002-arm64-dts-rockchip-disable-pwm0-on-rk3399-firefly.patch",
+      "sha256": "a95878bd09a450352379af944a77b8ce2469c08707cb41d9eff23b9df2e0a0c6",
+      "source_path": "kernel/linux-aarch64/0002-arm64-dts-rockchip-disable-pwm0-on-rk3399-firefly.patch"
+    },
+    {
+      "path": "reproduce/baseline/0003-pps-Compatibility-hack-should-be-X86-specific.patch",
+      "sha256": "19c6943b700756bdb94117e791c4605182b9144f1f78f5d0e50bf2a6ba8a1c58",
+      "source_path": "kernel/linux-aarch64/0003-pps-Compatibility-hack-should-be-X86-specific.patch"
+    },
+    {
+      "path": "reproduce/baseline/0004-serial-amba-pl011-add-arm-pl011-axi-binding-for-RP1.patch",
+      "sha256": "ca9adf0aed11a8b2372998477cc9e91ea3564cef7066d6ddc4fd0007dbe5d4e5",
+      "source_path": "kernel/linux-aarch64/0004-serial-amba-pl011-add-arm-pl011-axi-binding-for-RP1.patch"
+    },
+    {
+      "path": "reproduce/baseline/0005-arm64-dts-rpi5-add-RP1-UART0-GPIO14-15-console.patch",
+      "sha256": "9884639546f2d7612518ba8e4d0b01ca2c5f919370059f2c71542a7adc031901",
+      "source_path": "kernel/linux-aarch64/0005-arm64-dts-rpi5-add-RP1-UART0-GPIO14-15-console.patch"
+    },
+    {
+      "path": "reproduce/baseline/0006-surface8-edp-tps3-phy-errors-4320.patch",
+      "sha256": "c2968710cb6334779e15a3191f76ca6984e8ebd349c867c4cd89265ea7399457",
+      "source_path": "kernel/linux-aarch64/0006-surface8-edp-tps3-phy-errors-4320.patch"
+    },
+    {
+      "path": "reproduce/baseline/0007-surface8-edp-phy-lock-debug-knobs.patch",
+      "sha256": "27b00be39f3f706a71fda3d913c79da7c4c1a625d6d17061d2a476e5260334d4",
+      "source_path": "kernel/linux-aarch64/0007-surface8-edp-phy-lock-debug-knobs.patch"
+    },
+    {
+      "path": "reproduce/baseline/0008-surface8-edp-fw-pll-row-and-max-link-rate.patch",
+      "sha256": "9ab9eb8a4f2a960c2327ab6f013fe285d55732b35a69c53b9ade0e26ca77fcbc",
+      "source_path": "kernel/linux-aarch64/0008-surface8-edp-fw-pll-row-and-max-link-rate.patch"
+    },
+    {
+      "path": "reproduce/baseline/0009-surface8-edp-v8-hbr2-native-power-on.patch",
+      "sha256": "a4023c1585a3eeb189837f16e0cf11c6524acec539a6bac1023cd108e1565cae",
+      "source_path": "kernel/linux-aarch64/0009-surface8-edp-v8-hbr2-native-power-on.patch"
+    },
+    {
+      "path": "reproduce/baseline/0010-surface8-edp-aux-backlight-mode.patch",
+      "sha256": "d5a5e64882bd37704a2b0bdaadbb6847c762dc1b35186f73a9f728e6b7146d83",
+      "source_path": "kernel/linux-aarch64/0010-surface8-edp-aux-backlight-mode.patch"
+    },
+    {
+      "path": "reproduce/baseline/0011-surface8-wifi-rfkill.patch",
+      "sha256": "0cba6f2f66dabb894106a93109249c4048289134f1eed65b5e7e77c2e115571f",
+      "source_path": "kernel/linux-aarch64/0011-surface8-wifi-rfkill.patch"
+    },
+    {
+      "path": "reproduce/baseline/0012-adreno-gen8-gmem-size.patch",
+      "sha256": "184d5a9ab42a39087872734e74278fb5211d8c31f7d3dbab30369b3dfc2fe68c",
+      "source_path": "kernel/linux-aarch64/0012-adreno-gen8-gmem-size.patch"
+    },
+    {
+      "path": "reproduce/baseline/0013-surface8-audio-board.patch",
+      "sha256": "9755e6cb51667e825b028e0b78433b7f86d7de5dca48be1aa59c1d64f6b7cec2",
+      "source_path": "kernel/linux-aarch64/0013-surface8-audio-board.patch"
+    },
+    {
+      "path": "reproduce/baseline/0014-lpass-cache-01.patch",
+      "sha256": "4e5389327cfe51c519b19554be73b8ec26d4cafde3df87f0f8c6a0dea55a468b",
+      "source_path": "kernel/linux-aarch64/0014-lpass-cache-01.patch"
+    },
+    {
+      "path": "reproduce/baseline/0015-lpass-cache-02.patch",
+      "sha256": "6cc9548fe7401feadb68d5072e4fe94b1e893f9bf8a85a5dd7e3dcdacfbee952",
+      "source_path": "kernel/linux-aarch64/0015-lpass-cache-02.patch"
+    },
+    {
+      "path": "reproduce/baseline/0016-lpass-cache-03.patch",
+      "sha256": "ff8c0b1d5d7866ee4ce02508a92372dd07129040d6b1abb0e9be05e90a19769c",
+      "source_path": "kernel/linux-aarch64/0016-lpass-cache-03.patch"
+    },
+    {
+      "path": "reproduce/baseline/0017-lpass-cache-04.patch",
+      "sha256": "b8d1958da39386914890c53d028cfd2a6123adbb67d682d3f70cb98ffc93a5a2",
+      "source_path": "kernel/linux-aarch64/0017-lpass-cache-04.patch"
+    },
+    {
+      "path": "reproduce/baseline/0018-lpass-cache-05.patch",
+      "sha256": "205d58b77afa0af934bfd7132737d618420839f4c43dd17a1f1f763174463d00",
+      "source_path": "kernel/linux-aarch64/0018-lpass-cache-05.patch"
+    },
+    {
+      "path": "reproduce/baseline/0019-lpass-cache-06.patch",
+      "sha256": "44c2fe3acb181193276d0b9ee1662836b8998f40a640ae8b96c3b2eb8367d42a",
+      "source_path": "kernel/linux-aarch64/0019-lpass-cache-06.patch"
+    },
+    {
+      "path": "reproduce/baseline/0020-glymur-dp-phy-v4-1-Add-DP-COM-v8-header-and.patch",
+      "sha256": "f69c056199c2dd1b70775ed10fc51ac11939b538ae7480ec7d0cf06f37e22887",
+      "source_path": "kernel/linux-aarch64/0020-glymur-dp-phy-v4-1-Add-DP-COM-v8-header-and.patch"
+    },
+    {
+      "path": "reproduce/baseline/0021-glymur-dp-phy-v4-2-Update-DP-PHY-common-init.patch",
+      "sha256": "29734bf1892383f9f01542e3269a7027d21add952e19e2c5efd522ab6a6369e8",
+      "source_path": "kernel/linux-aarch64/0021-glymur-dp-phy-v4-2-Update-DP-PHY-common-init.patch"
+    },
+    {
+      "path": "reproduce/baseline/0022-glymur-dp-phy-v4-3-Update-link-rate-specific.patch",
+      "sha256": "38742c653961af9487ee4d8d9008e3460d2fa7efbdcc5682f79eb1c888de8e35",
+      "source_path": "kernel/linux-aarch64/0022-glymur-dp-phy-v4-3-Update-link-rate-specific.patch"
+    },
+    {
+      "path": "reproduce/baseline/0023-glymur-dp-phy-v4-4-Add-hardware-specific-DP.patch",
+      "sha256": "b7bc3b3ba4c08d606842af9af09033fbf0903873f11800afc855a5dffe520c2a",
+      "source_path": "kernel/linux-aarch64/0023-glymur-dp-phy-v4-4-Add-hardware-specific-DP.patch"
+    },
+    {
+      "path": "reproduce/baseline/0024-glymur-dp-phy-v4-5-Add-v8-PCS-level-drive.patch",
+      "sha256": "ea6ff2790db1f4715eeac52e74c21b02057134834d83ed097f337c865af5a390",
+      "source_path": "kernel/linux-aarch64/0024-glymur-dp-phy-v4-5-Add-v8-PCS-level-drive.patch"
+    },
+    {
+      "path": "reproduce/baseline/0025-glymur-dp-phy-v4-6-Extract-common-DP-PHY.patch",
+      "sha256": "237821fc7be55146cb1e7297aa9a37f748532869e41e20d8c78d5a0d8e2e19f5",
+      "source_path": "kernel/linux-aarch64/0025-glymur-dp-phy-v4-6-Extract-common-DP-PHY.patch"
+    },
+    {
+      "path": "reproduce/baseline/0026-glymur-dp-phy-v4-7-Update.patch",
+      "sha256": "40c20ff2a57dcb9628f036e508225c07b575825c80af017abbbe2c27fd313736",
+      "source_path": "kernel/linux-aarch64/0026-glymur-dp-phy-v4-7-Update.patch"
+    },
+    {
+      "path": "reproduce/baseline/0027-glymur-dp-phy-v4-8-Fix-Glymur-v8-DP-PHY-init.patch",
+      "sha256": "6e0422ecbdd496daaf626f83d999967a6180f7bed964b76a32780f7632e81a81",
+      "source_path": "kernel/linux-aarch64/0027-glymur-dp-phy-v4-8-Fix-Glymur-v8-DP-PHY-init.patch"
+    },
+    {
+      "path": "reproduce/baseline/0028-glymur-dp-phy-v4-9-Fix-error-propagation-in.patch",
+      "sha256": "fcd47a2f90d91f686aac8c1005a060565972151f062447cfb24e7e9ba81ad4bc",
+      "source_path": "kernel/linux-aarch64/0028-glymur-dp-phy-v4-9-Fix-error-propagation-in.patch"
+    },
+    {
+      "path": "reproduce/baseline/0029-phy-qcom-qmp-combo-v8-pcs-drive-levels.patch",
+      "sha256": "e3bb8ccf76f7cf64e11017079f7ec5c8ed145ae4c2bf15937c817224ac0802ec",
+      "source_path": "kernel/linux-aarch64/0029-phy-qcom-qmp-combo-v8-pcs-drive-levels.patch"
+    },
+    {
+      "path": "reproduce/baseline/0030-surface8-scope-edp-overrides-to-internal-panel.patch",
+      "sha256": "7be14faf4fa0688257b914b67782e65a307f7df9fa80c1c25e0a98a6e77b73e5",
+      "source_path": "kernel/linux-aarch64/0030-surface8-scope-edp-overrides-to-internal-panel.patch"
+    },
+    {
+      "path": "reproduce/baseline/0031-drm-msm-dp-skip-push-idle-when-link-never-enabled.patch",
+      "sha256": "82421fba7722132df82ed566cb88629432cf7f22b8bdf1ec5f49b68037bdc000",
+      "source_path": "kernel/linux-aarch64/0031-drm-msm-dp-skip-push-idle-when-link-never-enabled.patch"
+    },
+    {
+      "path": "reproduce/baseline/0032-drm-bridge-aux-hpd-bridge-replay-last-hpd-status.patch",
+      "sha256": "bcc6fbeff09eb213fa09a372218683b2dcf912f51e9d9825087678a254b163df",
+      "source_path": "kernel/linux-aarch64/0032-drm-bridge-aux-hpd-bridge-replay-last-hpd-status.patch"
+    },
+    {
+      "path": "reproduce/baseline/0033-ucsi-preserve-active-altmode-alongside-usb.patch",
+      "sha256": "d2fa6ac4e90e7270566b03efa11be3153974e93507e29542421e1ee2999443f6",
+      "source_path": "kernel/linux-aarch64/0033-ucsi-preserve-active-altmode-alongside-usb.patch"
+    },
+    {
+      "path": "reproduce/baseline/0034-drm-msm-dp-propagate-stream-retrain-failure.patch",
+      "sha256": "d293dc5b6d5780549627042d06087fd4b6ee4c252c0b9235ec4c58b7f9e20a26",
+      "source_path": "kernel/linux-aarch64/0034-drm-msm-dp-propagate-stream-retrain-failure.patch"
+    },
+    {
+      "path": "reproduce/baseline/0035-arm64-dts-qcom-glymur-add-missing-usb-votes.patch",
+      "sha256": "b376a7e889292ebd7167e884af0aa7baf2c220ca20b5a0798399ab60cd99a8fd",
+      "source_path": "kernel/linux-aarch64/0035-arm64-dts-qcom-glymur-add-missing-usb-votes.patch"
+    },
+    {
+      "path": "reproduce/baseline/0036-surface8-usbc-dual-role-and-alt-mode-dp.patch",
+      "sha256": "6f6d15f9a7257c2380fd61f14bca82ba26c659df856c7d105e6947c56cfdf1f8",
+      "source_path": "kernel/linux-aarch64/0036-surface8-usbc-dual-role-and-alt-mode-dp.patch"
+    },
+    {
+      "path": "reproduce/baseline/0037-phy-qcom-qmp-combo-dp-lane-ownership.patch",
+      "sha256": "6fdeb11efe193596e579cd44901a45b4cf07891f2a99cd19ac1c8ad4965cb31c",
+      "source_path": "kernel/linux-aarch64/0037-phy-qcom-qmp-combo-dp-lane-ownership.patch"
+    },
+    {
+      "path": "reproduce/baseline/0038-phy-qcom-qmp-combo-glymur-dp-mode-follows-orientation.patch",
+      "sha256": "24d18e1c8eecd03a3122f8d3ffddc33bd38f85bb3d2f8050fb1ec797dba24e08",
+      "source_path": "kernel/linux-aarch64/0038-phy-qcom-qmp-combo-glymur-dp-mode-follows-orientation.patch"
+    },
+    {
+      "path": "reproduce/baseline/0039-drm-msm-dp-retry-link-training-bridge-hpd.patch",
+      "sha256": "8c88bdc073a7d66ce1eaa939ba9cbdf84d128a757e445522da846fba6c3c6de0",
+      "source_path": "kernel/linux-aarch64/0039-drm-msm-dp-retry-link-training-bridge-hpd.patch"
+    },
+    {
+      "path": "reproduce/baseline/glymur-microsoft-surface-laptop8.dts",
+      "sha256": "963ceaba6b927da1d3ed687e22827f5d3c1cfa7454314c023208e3c1dbf0de12",
+      "source_path": "kernel/linux-aarch64/glymur-microsoft-surface-laptop8.dts"
+    },
+    {
+      "path": "provenance/usb4/00-usb4phy-v5-konrad-dybcio.mbox",
+      "sha256": "976962a4fc7a2ec3c21469ed6a0b1f26005086a3cfe6513a799af1facb211b54",
+      "source_path": "kernel/usb4-candidate/provenance/00-usb4phy-v5-konrad-dybcio.mbox"
+    },
+    {
+      "path": "provenance/usb4/01-v5-merged-for-133.diff",
+      "sha256": "71cd0cfd4cbc1e4d72c284362bd009b337fb9c3987367515b4b6d571a1b560e3",
+      "source_path": "kernel/usb4-candidate/provenance/01-v5-merged-for-133.diff"
+    },
+    {
+      "path": "provenance/usb4/02-v5-lifecycle-fixes.diff",
+      "sha256": "19110ff8b12f7cf45d145354518cf5b09d647a446f369cbbcfa4aa293e89963b",
+      "source_path": "kernel/usb4-candidate/provenance/02-v5-lifecycle-fixes.diff"
+    },
+    {
+      "path": "provenance/usb4/03-glymur-usb4-mode.diff",
+      "sha256": "66e880c600d47a54abfd6e8bd384a10ec88cd928438034d61bfb5bdb82ba87dc",
+      "source_path": "kernel/usb4-candidate/provenance/03-glymur-usb4-mode.diff"
+    },
+    {
+      "path": "provenance/usb4/04-glymur-usb4-bindings-board.diff",
+      "sha256": "f3ce411c24dd8e1db4a7dea7a8e9adf509103e49d447baacba2492d2633e9e67",
+      "source_path": "kernel/usb4-candidate/provenance/04-glymur-usb4-bindings-board.diff"
+    },
+    {
+      "path": "provenance/usb4/05-glymur-p2rr2p-mux.diff",
+      "sha256": "b0c1360ac2e80b6f8b9751407acd0a2014dc2feb1998129eb59ee4cbfb2bb577",
+      "source_path": "kernel/usb4-candidate/provenance/05-glymur-p2rr2p-mux.diff"
+    },
+    {
+      "path": "provenance/usb4/06-glymur-rx-mux.diff",
+      "sha256": "702220d592660725310f94a90b67b7256122a32a1acb22cd899971cbcb69b9d1",
+      "source_path": "kernel/usb4-candidate/provenance/06-glymur-rx-mux.diff"
+    },
+    {
+      "path": "provenance/usb4/07-glymur-usb4-resets.diff",
+      "sha256": "96bdc3c6c4476c2d3cb8233680ab98f2d0ce35448875f3c06907fc28407456ed",
+      "source_path": "kernel/usb4-candidate/provenance/07-glymur-usb4-resets.diff"
+    },
+    {
+      "path": "provenance/usb4/08-pmic-glink-tbt-payload.diff",
+      "sha256": "ed1ac1fbddeb90e1418e8b717913e54199913d0310b12cbc10314ba6118d7d0d",
+      "source_path": "kernel/usb4-candidate/provenance/08-pmic-glink-tbt-payload.diff"
+    },
+    {
+      "path": "provenance/usb4/09-pmic-glink-usb4-validation.diff",
+      "sha256": "5dedd77ca711fcde6075a14ca7523836fb6700ed34a2898ba893f7b0e1133b77",
+      "source_path": "kernel/usb4-candidate/provenance/09-pmic-glink-usb4-validation.diff"
+    },
+    {
+      "path": "provenance/usb4/10-thunderbolt-share-nhi-teardown.patch",
+      "sha256": "e4d4fcdbeb63616d4350ab4ea7aa5b830baa8ab2f3a7ceda9f280a1075e228c6",
+      "source_path": "kernel/usb4-candidate/provenance/10-thunderbolt-share-nhi-teardown.patch"
+    },
+    {
+      "path": "provenance/usb4/11-thunderbolt-limit-icm-probe-to-pci.patch",
+      "sha256": "777f56d196b1e1dbf08d1c4c806648e743182ee2e60e067bbdfb8dd262a6f0e3",
+      "source_path": "kernel/usb4-candidate/provenance/11-thunderbolt-limit-icm-probe-to-pci.patch"
+    },
+    {
+      "path": "provenance/usb4/12-thunderbolt-configure-dma-in-pci-probe.patch",
+      "sha256": "a1572daa659c8851aaea96550d3444b7ff829465d7a5ee80b2d4a18efecba2aa",
+      "source_path": "kernel/usb4-candidate/provenance/12-thunderbolt-configure-dma-in-pci-probe.patch"
+    },
+    {
+      "path": "provenance/usb4/13-thunderbolt-allow-separate-dma-device.patch",
+      "sha256": "e73ce46f4366b62cc6f125a7c4ab682c00310fb94cd446e1018a118190bc21fb",
+      "source_path": "kernel/usb4-candidate/provenance/13-thunderbolt-allow-separate-dma-device.patch"
+    },
+    {
+      "path": "provenance/usb4/14-thunderbolt-separate-interrupt-cause-dispatch.patch",
+      "sha256": "3b8491591e5482190748d402eedc82bc7c309e10defb8dc73dd9e30a5beb87c0",
+      "source_path": "kernel/usb4-candidate/provenance/14-thunderbolt-separate-interrupt-cause-dispatch.patch"
+    },
+    {
+      "path": "provenance/usb4/15-thunderbolt-keep-stopped-polling-rings-masked.patch",
+      "sha256": "93e14e3c397483807fad69547d437fb20d14079b939652c23d84c0c59b920426",
+      "source_path": "kernel/usb4-candidate/provenance/15-thunderbolt-keep-stopped-polling-rings-masked.patch"
+    },
+    {
+      "path": "provenance/usb4/16-thunderbolt-initialize-lock-before-interrupts.patch",
+      "sha256": "1c361ab468380ded432001524cb8b0b47524024d6345eaad65147010730a980a",
+      "source_path": "kernel/usb4-candidate/provenance/16-thunderbolt-initialize-lock-before-interrupts.patch"
+    },
+    {
+      "path": "provenance/usb4/17-thunderbolt-support-ring-interrupt-mask-transport.patch",
+      "sha256": "5fbb8c9f02c309d637d897a178c95e8695bf9a3519f763b7d2ea86b7c88b51a1",
+      "source_path": "kernel/usb4-candidate/provenance/17-thunderbolt-support-ring-interrupt-mask-transport.patch"
+    },
+    {
+      "path": "provenance/usb4/18-thunderbolt-support-global-interrupt-disable-transport.patch",
+      "sha256": "f7b75a5b8d84125b5a4785721c4faddfa1b4e53a89f0ff9970fc6c44b9dc0e64",
+      "source_path": "kernel/usb4-candidate/provenance/18-thunderbolt-support-global-interrupt-disable-transport.patch"
+    },
+    {
+      "path": "provenance/usb4/19-thunderbolt-document-shared-ring-interrupt-ownership.patch",
+      "sha256": "64d1ea5c852a35d641a4a6e8ddb0a5643e04998c623baec32784208d0944f951",
+      "source_path": "kernel/usb4-candidate/provenance/19-thunderbolt-document-shared-ring-interrupt-ownership.patch"
+    },
+    {
+      "path": "provenance/usb4/20-clk-qcom-reset-propagate-errors.patch",
+      "sha256": "c5a4949484fb6759e153c054548327256e46017aeefb9c53a5a1499d30087ae0",
+      "source_path": "kernel/usb4-candidate/provenance/20-clk-qcom-reset-propagate-errors.patch"
+    },
+    {
+      "path": "provenance/usb4/21-drm-msm-dp-propagate-host-phy-init-errors.patch",
+      "sha256": "49e76cb0222291f88017f71657cd8b0b60c1e8ca2400979155ae63189ed13ffb",
+      "source_path": "kernel/usb4-candidate/provenance/21-drm-msm-dp-propagate-host-phy-init-errors.patch"
+    },
+    {
+      "path": "provenance/usb4/22-usb4-glymur-host-router-frontend.patch",
+      "sha256": "0fb4b84a7522a0cf3352a8864d3235d335f8ac3a12812d73818703a94b4c35ca",
+      "source_path": "kernel/usb4-candidate/provenance/22-usb4-glymur-host-router-frontend.patch"
+    },
+    {
+      "path": "provenance/usb4/SHA256SUMS",
+      "sha256": "1727c971467f4bc630658e61be66e4a1b51c9c2cc7c3998623d55b743a6cd743",
+      "source_path": "kernel/usb4-candidate/provenance/SHA256SUMS"
+    }
+  ],
+  "derived_files": [
+    {
+      "path": "patches/0001-phy-qualcomm-usb4.patch",
+      "sha256": "dc1db2f1d7cf96a09fa34baea007422f748aaf05ba411587be1402ab6147b8e4"
+    },
+    {
+      "path": "patches/0002-clk-qcom-usb4.patch",
+      "sha256": "aef5ebe954518ff2f622c741c3af3734edd0d6eb82772cacd429ca3e169b51ad"
+    },
+    {
+      "path": "patches/0003-thunderbolt-shared-host.patch",
+      "sha256": "83bb6b6c457943d5959d9adb0f2d776b8ac7a38d5d2924d7712895da5803938d"
+    },
+    {
+      "path": "patches/0004-usb-qcom-glink-dock.patch",
+      "sha256": "34d75049b767608128722da0684dda209906e7215027f9fef4548dfc2208470e"
+    },
+    {
+      "path": "patches/0005-thunderbolt-qcom-router.patch",
+      "sha256": "edef8f17c52cd220f93621b85a0856adbe9123088766c83915a55ccacd1639ce"
+    },
+    {
+      "path": "patches/0006-drm-msm-dpu-routing-dsc.patch",
+      "sha256": "766fee072ddd1b3ce4957a39353234b6b47e46832c535ea71d8f89cdb56278bc"
+    },
+    {
+      "path": "patches/0007-drm-msm-dp-tunneling.patch",
+      "sha256": "3f62bc8650ce386f90100a66428d227e847c1674260c3c3bdf0d7c64bd8bc679"
+    },
+    {
+      "path": "patches/0008-arm64-dts-qcom-usb4.patch",
+      "sha256": "31adb8f6d476744a847b952b128477fbe50eefecfa190f36e7d412f1ed1dd524"
+    },
+    {
+      "path": "patches/0009-arm64-dts-surface-usb4.patch",
+      "sha256": "1ccbbed2c35f7edd5cb473b96bd97697cd50fbb67640bc0bd7bd12b068eb2f6d"
+    },
+    {
+      "path": "patches/series",
+      "sha256": "1b29c629cabb9adf47b78bad4580515838772849dcafc81f28963660df9211ad"
+    },
+    {
+      "path": "tests/test-dpu-plane-split-reset.py",
+      "sha256": "f1734525a6331d7bb13b28f86521d1581caf20069fef6c2571ff2610554fad93",
+      "source_path": "kernel/usb4-candidate/test-dpu-plane-split-reset.py",
+      "source_sha256": "76df924dfca39470f375a79b605240d6a3816d89c8e7b9b9bec5bb8b12a75b29",
+      "change": "Include local assertion-exit handler; require exit 134 for negative controls instead of any nonzero status."
+    },
+    {
+      "path": "tests/test-usb4-fec-integration.py",
+      "sha256": "6bcbf76289342e23f2abc60433c4af6c4c38b49d72d0bd2defa97ff8cc5235b9",
+      "source_path": "kernel/usb4-candidate/test-usb4-fec-integration.py",
+      "source_sha256": "5075d8c001e16b7ad1f57688f0f9811d162c5675859706005fe2ba1a35fcd349",
+      "change": "Include local assertion-exit handler; require exit 134 for negative controls instead of any nonzero status."
+    },
+    {
+      "path": "tests/test-usb4-idle-status.py",
+      "sha256": "525fc4e950edd813fca6a475666edffb2bfd34a9c839566e5bf7d3f3f73846f9",
+      "source_path": "kernel/usb4-candidate/test-usb4-idle-status.py",
+      "source_sha256": "d1806a5efc37ccc848758b77590b2056a0b43c6674465cfec646754af7269f90",
+      "change": "Include local assertion-exit handler; require exit 134 for negative controls instead of any nonzero status."
+    },
+    {
+      "path": "tests/test-usb4-link-irq.py",
+      "sha256": "fd3a3e24c5fd9552ecbdc63ca09ba306cb47beff659c2c78ca2fc68bd30f4e5f",
+      "source_path": "kernel/usb4-candidate/test-usb4-link-irq.py",
+      "source_sha256": "6c311a0ecab128f715ca1256568795a0b5cca53f40436070513676f5b7cc3036",
+      "change": "Include local assertion-exit handler; require exit 134 for negative controls instead of any nonzero status."
+    },
+    {
+      "path": "tests/test-usb4-route-restore.py",
+      "sha256": "09e2f5897e8a75211b0897fbae1b3fa979ef9f80f72aa9f0e05aee2be3c64de4",
+      "source_path": "kernel/usb4-candidate/test-usb4-route-restore.py",
+      "source_sha256": "8ea58fa9673dff7b4bde70a2f68fb99dc47fd68d635fd1cd0208a00fed48760b",
+      "change": "Include local assertion-exit handler; require exit 134 for negative controls instead of any nonzero status."
+    },
+    {
+      "path": "tests/harness.h",
+      "sha256": "6af1165f4041eb7265213fbd5128573a72308d659477a29dc534b58695f47834",
+      "change": "Local SIGABRT handler for assertion failures in temporary test executables."
+    }
+  ]
+}

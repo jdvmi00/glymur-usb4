@@ -1,0 +1,101 @@
+Subject: [REVIEW 08/09] Qualcomm SoC USB4 descriptions
+
+Add the shared Glymur/Hamoa PHY/router description changes needed by the tested topology. Review clock, reset, interconnect and endpoint contracts against the drivers.
+
+Dependencies: Patches 01-07 provide the referenced interfaces. Shared SoC placement does not establish testing on other boards.
+
+Source attribution: Konrad Dybcio Hamoa PHY description changes in provenance/usb4/00-usb4phy-v5-konrad-dybcio.mbox, plus local Glymur integration in provenance/usb4/04-glymur-usb4-bindings-board.diff and provenance/derivation.json.
+
+This is a review grouping of preserved source, not a new authorship claim or
+an independently build-validated upstream commit. Original attribution remains
+in the referenced provenance files. No new Signed-off-by trailers are added.
+
+---
+diff --git a/arch/arm64/boot/dts/qcom/glymur.dtsi b/arch/arm64/boot/dts/qcom/glymur.dtsi
+index fbbc82550c442568a6c9ad7b85edaa47ac4b291c..91d243559d351ed5e34b48fc615827c3e25dbe12 100644
+--- a/arch/arm64/boot/dts/qcom/glymur.dtsi
++++ b/arch/arm64/boot/dts/qcom/glymur.dtsi
+@@ -2517,11 +2517,13 @@
+ 			clocks = <&gcc GCC_USB3_PRIM_PHY_AUX_CLK>,
+ 				 <&rpmhcc RPMH_CXO_CLK>,
+ 				 <&gcc GCC_USB3_PRIM_PHY_COM_AUX_CLK>,
+-				 <&gcc GCC_USB3_PRIM_PHY_PIPE_CLK>;
++				 <&gcc GCC_USB3_PRIM_PHY_PIPE_CLK>,
++				 <&gcc GCC_USB4_0_PHY_P2RR2P_PIPE_CLK>;
+ 			clock-names = "aux",
+ 				      "ref",
+ 				      "com_aux",
+-				      "usb3_pipe";
++				      "usb3_pipe",
++				      "p2rr2p_pipe";
+ 
+ 			resets = <&gcc GCC_USB3_PHY_PRIM_BCR>,
+ 				 <&gcc GCC_USB3PHY_PHY_PRIM_BCR>;
+@@ -2590,11 +2592,13 @@
+ 			clocks = <&gcc GCC_USB3_SEC_PHY_AUX_CLK>,
+ 				 <&tcsr TCSR_USB4_1_CLKREF_EN>,
+ 				 <&gcc GCC_USB3_SEC_PHY_COM_AUX_CLK>,
+-				 <&gcc GCC_USB3_SEC_PHY_PIPE_CLK>;
++				 <&gcc GCC_USB3_SEC_PHY_PIPE_CLK>,
++				 <&gcc GCC_USB4_1_PHY_P2RR2P_PIPE_CLK>;
+ 			clock-names = "aux",
+ 				      "ref",
+ 				      "com_aux",
+-				      "usb3_pipe";
++				      "usb3_pipe",
++				      "p2rr2p_pipe";
+ 
+ 			power-domains = <&gcc GCC_USB_1_PHY_GDSC>;
+ 
+diff --git a/arch/arm64/boot/dts/qcom/hamoa.dtsi b/arch/arm64/boot/dts/qcom/hamoa.dtsi
+index 8a96ea1bdb9c4c409b2af997680d8c13fed0643e..17a7fbaaedc00a5a0c8ff55c99836bbbacacf0da 100644
+--- a/arch/arm64/boot/dts/qcom/hamoa.dtsi
++++ b/arch/arm64/boot/dts/qcom/hamoa.dtsi
+@@ -2833,11 +2833,13 @@
+ 			clocks = <&gcc GCC_USB3_PRIM_PHY_AUX_CLK>,
+ 				 <&rpmhcc RPMH_CXO_CLK>,
+ 				 <&gcc GCC_USB3_PRIM_PHY_COM_AUX_CLK>,
+-				 <&gcc GCC_USB3_PRIM_PHY_PIPE_CLK>;
++				 <&gcc GCC_USB3_PRIM_PHY_PIPE_CLK>,
++				 <&gcc GCC_USB4_0_PHY_P2RR2P_PIPE_CLK>;
+ 			clock-names = "aux",
+ 				      "ref",
+ 				      "com_aux",
+-				      "usb3_pipe";
++				      "usb3_pipe",
++				      "p2rr2p_pipe";
+ 
+ 			power-domains = <&gcc GCC_USB_0_PHY_GDSC>;
+ 
+@@ -2904,11 +2906,13 @@
+ 			clocks = <&gcc GCC_USB3_SEC_PHY_AUX_CLK>,
+ 				 <&tcsr TCSR_USB4_1_CLKREF_EN>,
+ 				 <&gcc GCC_USB3_SEC_PHY_COM_AUX_CLK>,
+-				 <&gcc GCC_USB3_SEC_PHY_PIPE_CLK>;
++				 <&gcc GCC_USB3_SEC_PHY_PIPE_CLK>,
++				 <&gcc GCC_USB4_1_PHY_P2RR2P_PIPE_CLK>;
+ 			clock-names = "aux",
+ 				      "ref",
+ 				      "com_aux",
+-				      "usb3_pipe";
++				      "usb3_pipe",
++				      "p2rr2p_pipe";
+ 
+ 			power-domains = <&gcc GCC_USB_1_PHY_GDSC>;
+ 
+@@ -2975,11 +2979,13 @@
+ 			clocks = <&gcc GCC_USB3_TERT_PHY_AUX_CLK>,
+ 				 <&tcsr TCSR_USB4_2_CLKREF_EN>,
+ 				 <&gcc GCC_USB3_TERT_PHY_COM_AUX_CLK>,
+-				 <&gcc GCC_USB3_TERT_PHY_PIPE_CLK>;
++				 <&gcc GCC_USB3_TERT_PHY_PIPE_CLK>,
++				 <&gcc GCC_USB4_2_PHY_P2RR2P_PIPE_CLK>;
+ 			clock-names = "aux",
+ 				      "ref",
+ 				      "com_aux",
+-				      "usb3_pipe";
++				      "usb3_pipe",
++				      "p2rr2p_pipe";
+ 
+ 			power-domains = <&gcc GCC_USB_2_PHY_GDSC>;
+ 

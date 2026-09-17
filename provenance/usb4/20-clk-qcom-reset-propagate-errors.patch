@@ -1,0 +1,43 @@
+--- a/drivers/clk/qcom/reset.c
++++ b/drivers/clk/qcom/reset.c
+@@ -14,12 +14,14 @@
+ static int qcom_reset(struct reset_controller_dev *rcdev, unsigned long id)
+ {
+ 	struct qcom_reset_controller *rst = to_qcom_reset_controller(rcdev);
++	int ret;
+ 
+-	rcdev->ops->assert(rcdev, id);
++	ret = rcdev->ops->assert(rcdev, id);
++	if (ret)
++		return ret;
+ 	fsleep(rst->reset_map[id].udelay ?: 1); /* use 1 us as default */
+ 
+-	rcdev->ops->deassert(rcdev, id);
+-	return 0;
++	return rcdev->ops->deassert(rcdev, id);
+ }
+ 
+ static int qcom_reset_set_assert(struct reset_controller_dev *rcdev,
+@@ -28,17 +30,18 @@
+ 	struct qcom_reset_controller *rst;
+ 	const struct qcom_reset_map *map;
+ 	u32 mask;
++	int ret;
+ 
+ 	rst = to_qcom_reset_controller(rcdev);
+ 	map = &rst->reset_map[id];
+ 	mask = map->bitmask ? map->bitmask : BIT(map->bit);
+ 
+-	regmap_update_bits(rst->regmap, map->reg, mask, assert ? mask : 0);
++	ret = regmap_update_bits(rst->regmap, map->reg, mask, assert ? mask : 0);
++	if (ret)
++		return ret;
+ 
+ 	/* Read back the register to ensure write completion, ignore the value */
+-	regmap_read(rst->regmap, map->reg, &mask);
+-
+-	return 0;
++	return regmap_read(rst->regmap, map->reg, &mask);
+ }
+ 
+ static int qcom_reset_assert(struct reset_controller_dev *rcdev, unsigned long id)

@@ -1,0 +1,313 @@
+{
+  "source_commit": "5a1b08350e42f45f83e32cdf07ace463f6cace0b",
+  "method": "Reverse the recorded patch sequence from verified final source, then diff the resulting baseline against that final source. No C changes.",
+  "inputs": [
+    {
+      "path": "kernel/checkpoint-1.73/0040-surface8-checkpoint-1.72.patch",
+      "sha256": "b3bb965d8a3e913d596d318ce6e8f4af211af39d16c6d547cde8f8c81fa16fb9"
+    },
+    {
+      "path": "kernel/usb4-candidate/usb4-candidate-1.74-vs-1.73.diff",
+      "sha256": "2a8d80e4a19c69c70963ca28682ca715d8723923b26e33f0d46408f5ee89475a"
+    },
+    {
+      "path": "kernel/usb4-candidate/usb4-candidate-1.75-vs-1.74.diff",
+      "sha256": "6d6ec8619566ecb1c81fbd2058299783d301c556fa07dec7cd84cfe982f7d7e1"
+    },
+    {
+      "path": "kernel/usb4-candidate/usb4-candidate-1.76-vs-1.75.diff",
+      "sha256": "767b7e36a8511a8b414bd5180b8fb2471d9558fa26936d32e0863d7a7af2480f"
+    },
+    {
+      "path": "kernel/usb4-candidate/usb4-candidate-1.77-vs-1.76.diff",
+      "sha256": "d072f89a738e5d09d9b90c174c55e27432f7ea76481771d5addce354b645463a"
+    },
+    {
+      "path": "kernel/usb4-candidate/usb4-candidate-1.78-vs-1.77.diff",
+      "sha256": "c88e6986f824f9b344dae9831e8400390b55f8d478e7a6ee67d7d30f5ed21972"
+    },
+    {
+      "path": "kernel/usb4-candidate/usb4-candidate-1.79-vs-1.78.diff",
+      "sha256": "060a9b83495d03da8ff3e628f97f8b5487572e6fcf4ad5221eb3dbef6d64dc39"
+    },
+    {
+      "path": "kernel/usb4-candidate/usb4-candidate-1.80-vs-1.79.diff",
+      "sha256": "68a00bb45ded54ec151bbd4045468b39b25dfceda45e026b33565e372ab8fb6c"
+    },
+    {
+      "path": "kernel/usb4-candidate/usb4-candidate-1.81-vs-1.80.diff",
+      "sha256": "7d713402ef79ba978b4b30a1a3e59e9ce2f1a982b1a92936e12af04accc63abd"
+    },
+    {
+      "path": "kernel/usb4-candidate/usb4-candidate-1.82-vs-1.81.diff",
+      "sha256": "515d3651621efc1ad941cdecb0ee321a3bf811d3f0ac9d68ce1aa0afb88ad144"
+    },
+    {
+      "path": "kernel/usb4-candidate/usb4-candidate-1.83-vs-1.82.diff",
+      "sha256": "677dc1d0ee25fd3502ff9f71cd9e267597255bb4ab8e63a2775c115db7b68aa9"
+    },
+    {
+      "path": "kernel/usb4-candidate/usb4-candidate-1.85-vs-1.84.diff",
+      "sha256": "5cefab73665f39b9da1a3672677d4d5768f3dbaf0a0f50e97c7756b9fb810f4a"
+    }
+  ],
+  "affected_paths": [
+    "arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts",
+    "arch/arm64/boot/dts/qcom/glymur.dtsi",
+    "arch/arm64/boot/dts/qcom/hamoa.dtsi",
+    "drivers/clk/qcom/dispcc-glymur.c",
+    "drivers/clk/qcom/gcc-glymur.c",
+    "drivers/clk/qcom/reset.c",
+    "drivers/gpu/drm/display/drm_dp_helper.c",
+    "drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_12_2_glymur.h",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.h",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys.h",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.h",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc.h",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_mdss.h",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_pingpong.c",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_pingpong.h",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_top.c",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_top.h",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c",
+    "drivers/gpu/drm/msm/disp/dpu1/dpu_rm.c",
+    "drivers/gpu/drm/msm/dp/dp_aux.c",
+    "drivers/gpu/drm/msm/dp/dp_aux.h",
+    "drivers/gpu/drm/msm/dp/dp_ctrl.c",
+    "drivers/gpu/drm/msm/dp/dp_ctrl.h",
+    "drivers/gpu/drm/msm/dp/dp_debug.c",
+    "drivers/gpu/drm/msm/dp/dp_display.c",
+    "drivers/gpu/drm/msm/dp/dp_panel.c",
+    "drivers/gpu/drm/msm/dp/dp_panel.h",
+    "drivers/gpu/drm/msm/dp/dp_reg.h",
+    "drivers/gpu/drm/msm/dp/dp_utils.c",
+    "drivers/gpu/drm/msm/dp/dp_utils.h",
+    "drivers/gpu/drm/msm/msm_drv.h",
+    "drivers/gpu/drm/msm/msm_kms.h",
+    "drivers/phy/qualcomm/phy-qcom-qmp-combo.c",
+    "drivers/phy/qualcomm/phy-qcom-qmp-glymur-usb4-tables.h",
+    "drivers/phy/qualcomm/phy-qcom-qmp-pcs-aon-v6.h",
+    "drivers/phy/qualcomm/phy-qcom-qmp-pcs-usb-v6.h",
+    "drivers/phy/qualcomm/phy-qcom-qmp-qserdes-txrx-v6_n4.h",
+    "drivers/soc/qcom/pmic_glink_altmode.c",
+    "drivers/thunderbolt/Kconfig",
+    "drivers/thunderbolt/Makefile",
+    "drivers/thunderbolt/ctl.c",
+    "drivers/thunderbolt/icm.c",
+    "drivers/thunderbolt/nhi.c",
+    "drivers/thunderbolt/nhi.h",
+    "drivers/thunderbolt/pci.c",
+    "drivers/thunderbolt/qcom-usb4-dp-link.c",
+    "drivers/thunderbolt/qcom-usb4-dp-link.h",
+    "drivers/thunderbolt/qcom-usb4-dp.c",
+    "drivers/thunderbolt/qcom-usb4-dp.h",
+    "drivers/thunderbolt/qcom-usb4-drom.c",
+    "drivers/thunderbolt/qcom-usb4-drom.h",
+    "drivers/thunderbolt/qcom-usb4-events.c",
+    "drivers/thunderbolt/qcom-usb4-events.h",
+    "drivers/thunderbolt/qcom-usb4-fw.c",
+    "drivers/thunderbolt/qcom-usb4-fw.h",
+    "drivers/thunderbolt/qcom-usb4-host.c",
+    "drivers/thunderbolt/qcom-usb4-irq.c",
+    "drivers/thunderbolt/qcom-usb4-irq.h",
+    "drivers/thunderbolt/qcom-usb4-mcu.c",
+    "drivers/thunderbolt/qcom-usb4-mcu.h",
+    "drivers/thunderbolt/qcom-usb4-nhi.c",
+    "drivers/thunderbolt/qcom-usb4-nhi.h",
+    "drivers/thunderbolt/qcom-usb4-startup.c",
+    "drivers/thunderbolt/qcom-usb4-startup.h",
+    "drivers/thunderbolt/qcom-usb4-typec.c",
+    "drivers/thunderbolt/qcom-usb4-typec.h",
+    "drivers/thunderbolt/tb.c",
+    "drivers/thunderbolt/tb.h",
+    "drivers/thunderbolt/usb4.c",
+    "drivers/usb/core/hub.c",
+    "drivers/usb/dwc3/core.h",
+    "drivers/usb/dwc3/host.c",
+    "drivers/usb/host/xhci-hub.c",
+    "drivers/usb/host/xhci-plat.c",
+    "drivers/usb/host/xhci-plat.h",
+    "drivers/usb/host/xhci.c",
+    "drivers/usb/host/xhci.h",
+    "include/dt-bindings/clock/qcom,glymur-gcc.h",
+    "include/dt-bindings/phy/phy-qcom-qmp.h",
+    "include/linux/phy/phy-thunderbolt.h",
+    "include/linux/phy/phy.h",
+    "include/linux/soc/qcom/glymur-usb4.h",
+    "include/linux/soc/qcom/usb4-dp.h",
+    "include/linux/thunderbolt.h",
+    "include/linux/usb/quirks.h"
+  ],
+  "aggregate_input": {
+    "path": "patches/usb4-6k60.patch",
+    "sha256": "de309b1dbac3c83adc6a80371136a1dcfa79650da48da795b626626b59103afa",
+    "review_commit": "8996dcd2bc119e8fd6cb8caee92101a77246012a"
+  },
+  "split_method": "Partition complete file diffs by review responsibility, preserving every hunk. Normalize c/i prefixes to a/b. No C or device-tree changes.",
+  "results": [
+    {
+      "path": "patches/0001-phy-qualcomm-usb4.patch",
+      "sha256": "dc1db2f1d7cf96a09fa34baea007422f748aaf05ba411587be1402ab6147b8e4",
+      "affected_paths": [
+        "drivers/phy/qualcomm/phy-qcom-qmp-combo.c",
+        "drivers/phy/qualcomm/phy-qcom-qmp-glymur-usb4-tables.h",
+        "drivers/phy/qualcomm/phy-qcom-qmp-pcs-aon-v6.h",
+        "drivers/phy/qualcomm/phy-qcom-qmp-pcs-usb-v6.h",
+        "drivers/phy/qualcomm/phy-qcom-qmp-qserdes-txrx-v6_n4.h",
+        "include/dt-bindings/phy/phy-qcom-qmp.h",
+        "include/linux/phy/phy-thunderbolt.h",
+        "include/linux/phy/phy.h"
+      ],
+      "dependencies": "Base prerequisites. Used by patches 04 and 05."
+    },
+    {
+      "path": "patches/0002-clk-qcom-usb4.patch",
+      "sha256": "aef5ebe954518ff2f622c741c3af3734edd0d6eb82772cacd429ca3e169b51ad",
+      "affected_paths": [
+        "drivers/clk/qcom/dispcc-glymur.c",
+        "drivers/clk/qcom/gcc-glymur.c",
+        "drivers/clk/qcom/reset.c",
+        "include/dt-bindings/clock/qcom,glymur-gcc.h",
+        "include/linux/soc/qcom/glymur-usb4.h"
+      ],
+      "dependencies": "Base prerequisites. Used by patches 05 and 07."
+    },
+    {
+      "path": "patches/0003-thunderbolt-shared-host.patch",
+      "sha256": "83bb6b6c457943d5959d9adb0f2d776b8ac7a38d5d2924d7712895da5803938d",
+      "affected_paths": [
+        "drivers/thunderbolt/ctl.c",
+        "drivers/thunderbolt/icm.c",
+        "drivers/thunderbolt/nhi.c",
+        "drivers/thunderbolt/nhi.h",
+        "drivers/thunderbolt/pci.c",
+        "drivers/thunderbolt/tb.c",
+        "drivers/thunderbolt/tb.h",
+        "drivers/thunderbolt/usb4.c",
+        "include/linux/thunderbolt.h"
+      ],
+      "dependencies": "Base prerequisites for the shared transport. Required by patch 05. The CONFIG_USB4_QCOM-guarded code references qcom_usb4_host_driver, qcom_usb4_dp_driver and the router frontend defined in patch 05, so the tested configuration needs 05 to link."
+    },
+    {
+      "path": "patches/0004-usb-qcom-glink-dock.patch",
+      "sha256": "34d75049b767608128722da0684dda209906e7215027f9fef4548dfc2208470e",
+      "affected_paths": [
+        "drivers/soc/qcom/pmic_glink_altmode.c",
+        "drivers/usb/core/hub.c",
+        "drivers/usb/dwc3/core.h",
+        "drivers/usb/dwc3/host.c",
+        "drivers/usb/host/xhci-hub.c",
+        "drivers/usb/host/xhci-plat.c",
+        "drivers/usb/host/xhci-plat.h",
+        "drivers/usb/host/xhci.c",
+        "drivers/usb/host/xhci.h",
+        "include/linux/usb/quirks.h"
+      ],
+      "dependencies": "Base prerequisites; this patch references no symbols from patch 01. The validated USB4 mode messages are consumed by the Type-C handling in patch 05, which drives the PHY from patch 01."
+    },
+    {
+      "path": "patches/0005-thunderbolt-qcom-router.patch",
+      "sha256": "edef8f17c52cd220f93621b85a0856adbe9123088766c83915a55ccacd1639ce",
+      "affected_paths": [
+        "drivers/thunderbolt/Kconfig",
+        "drivers/thunderbolt/Makefile",
+        "drivers/thunderbolt/qcom-usb4-dp-link.c",
+        "drivers/thunderbolt/qcom-usb4-dp-link.h",
+        "drivers/thunderbolt/qcom-usb4-dp.c",
+        "drivers/thunderbolt/qcom-usb4-dp.h",
+        "drivers/thunderbolt/qcom-usb4-drom.c",
+        "drivers/thunderbolt/qcom-usb4-drom.h",
+        "drivers/thunderbolt/qcom-usb4-events.c",
+        "drivers/thunderbolt/qcom-usb4-events.h",
+        "drivers/thunderbolt/qcom-usb4-fw.c",
+        "drivers/thunderbolt/qcom-usb4-fw.h",
+        "drivers/thunderbolt/qcom-usb4-host.c",
+        "drivers/thunderbolt/qcom-usb4-irq.c",
+        "drivers/thunderbolt/qcom-usb4-irq.h",
+        "drivers/thunderbolt/qcom-usb4-mcu.c",
+        "drivers/thunderbolt/qcom-usb4-mcu.h",
+        "drivers/thunderbolt/qcom-usb4-nhi.c",
+        "drivers/thunderbolt/qcom-usb4-nhi.h",
+        "drivers/thunderbolt/qcom-usb4-startup.c",
+        "drivers/thunderbolt/qcom-usb4-startup.h",
+        "drivers/thunderbolt/qcom-usb4-typec.c",
+        "drivers/thunderbolt/qcom-usb4-typec.h",
+        "include/linux/soc/qcom/usb4-dp.h"
+      ],
+      "dependencies": "Patches 01-04; patches 06-07 complete the coupled display integration. Apply the complete series before building."
+    },
+    {
+      "path": "patches/0006-drm-msm-dpu-routing-dsc.patch",
+      "sha256": "766fee072ddd1b3ce4957a39353234b6b47e46832c535ea71d8f89cdb56278bc",
+      "affected_paths": [
+        "drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_12_2_glymur.h",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.h",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys.h",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.h",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc.h",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_mdss.h",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_pingpong.c",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_pingpong.h",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_top.c",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_hw_top.h",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c",
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_rm.c",
+        "drivers/gpu/drm/msm/msm_drv.h",
+        "drivers/gpu/drm/msm/msm_kms.h"
+      ],
+      "dependencies": "Base prerequisites. Supplies the DPU side of patch 07; evaluated with the complete host/display stack."
+    },
+    {
+      "path": "patches/0007-drm-msm-dp-tunneling.patch",
+      "sha256": "3f62bc8650ce386f90100a66428d227e847c1674260c3c3bdf0d7c64bd8bc679",
+      "affected_paths": [
+        "drivers/gpu/drm/display/drm_dp_helper.c",
+        "drivers/gpu/drm/msm/dp/dp_aux.c",
+        "drivers/gpu/drm/msm/dp/dp_aux.h",
+        "drivers/gpu/drm/msm/dp/dp_ctrl.c",
+        "drivers/gpu/drm/msm/dp/dp_ctrl.h",
+        "drivers/gpu/drm/msm/dp/dp_debug.c",
+        "drivers/gpu/drm/msm/dp/dp_display.c",
+        "drivers/gpu/drm/msm/dp/dp_panel.c",
+        "drivers/gpu/drm/msm/dp/dp_panel.h",
+        "drivers/gpu/drm/msm/dp/dp_reg.h",
+        "drivers/gpu/drm/msm/dp/dp_utils.c",
+        "drivers/gpu/drm/msm/dp/dp_utils.h"
+      ],
+      "dependencies": "Patch 05 supplies the usb4-dp.h provider interface and patch 06 the DPU side. Patch 02 is a runtime dependency rather than a symbol reference: dp_ctrl.c sets the DP input link clock rate, which needs the writable dispcc divider from 02 through the board clock bindings in 08-09. Patches 05-07 form a coupled host/display integration, not independently validated features."
+    },
+    {
+      "path": "patches/0008-arm64-dts-qcom-usb4.patch",
+      "sha256": "31adb8f6d476744a847b952b128477fbe50eefecfa190f36e7d412f1ed1dd524",
+      "affected_paths": [
+        "arch/arm64/boot/dts/qcom/glymur.dtsi",
+        "arch/arm64/boot/dts/qcom/hamoa.dtsi"
+      ],
+      "dependencies": "Patches 01-07 provide the referenced interfaces. Shared SoC placement does not establish testing on other boards."
+    },
+    {
+      "path": "patches/0009-arm64-dts-surface-usb4.patch",
+      "sha256": "1ccbbed2c35f7edd5cb473b96bd97697cd50fbb67640bc0bd7bd12b068eb2f6d",
+      "affected_paths": [
+        "arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts"
+      ],
+      "dependencies": "Patches 01-08 and the preserved Surface 1.17 prerequisites. Do not use this device tree for another board."
+    }
+  ]
+}

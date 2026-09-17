@@ -1,0 +1,391 @@
+Subject: [REVIEW 04/09] Qualcomm Type-C messaging and USB host behavior
+
+Validate USB4 mode messages and coordinate Type-C/PHY requests. Carry the recorded DWC3, xHCI and hub behavior used by the tested dock setup. Review the scope of quirks and impact on other USB hosts.
+
+Dependencies: Base prerequisites; this patch references no symbols from patch 01. The validated USB4 mode messages are consumed by the Type-C handling in patch 05, which drives the PHY from patch 01.
+
+Source attribution: Local Surface integration; provenance/usb4/08-pmic-glink-tbt-payload.diff and 09-pmic-glink-usb4-validation.diff; USB host/hub changes recorded in provenance/derivation.json.
+
+This is a review grouping of preserved source, not a new authorship claim or
+an independently build-validated upstream commit. Original attribution remains
+in the referenced provenance files. No new Signed-off-by trailers are added.
+
+---
+diff --git a/drivers/soc/qcom/pmic_glink_altmode.c b/drivers/soc/qcom/pmic_glink_altmode.c
+index 13c434f8d03a645548918b064ed79b81882f4497..390bc6e58d4c32e5bc5b02c4f7acaaf66cce005f 100644
+--- a/drivers/soc/qcom/pmic_glink_altmode.c
++++ b/drivers/soc/qcom/pmic_glink_altmode.c
+@@ -32,6 +32,20 @@
+ #define ALTMODE_PAN_EN		0x10
+ #define ALTMODE_PAN_ACK		0x11
+ 
++/*
++ * PAN_EN argument as sent by the Windows PMIC GLINK driver (qcpmicglink8480,
++ * PlatformConfig defaults): bits 0-2 carry UsbcPinAssignmentVersion (1 = "V2"),
++ * bits 3-6 an environment field (1 on an installed system, 2 under WinPE).
++ * With the legacy argument 0 the Surface Laptop 8 firmware never reports the
++ * tunneling mux state, so USB4 is never negotiated.
++ */
++#define ALTMODE_PAN_EN_V2_ARG	(1 | (1 << 3))
++
++static int pan_en_arg = -1;
++module_param(pan_en_arg, int, 0644);
++MODULE_PARM_DESC(pan_en_arg,
++		 "PAN_EN argument override (-1: per-SoC default, 0: legacy, 9: V2 as Windows)");
++
+ struct usbc_write_req {
+ 	struct pmic_glink_hdr   hdr;
+ 	__le32 cmd;
+@@ -129,6 +143,7 @@ struct pmic_glink_altmode {
+ 	struct device *dev;
+ 
+ 	unsigned int owner_id;
++	u32 pan_en_default;
+ 
+ 	/* To synchronize WRITE_REQ acks */
+ 	struct mutex lock;
+@@ -211,9 +226,25 @@ static void pmic_glink_altmode_enable_tbt(struct pmic_glink_altmode *altmode,
+ {
+ 	struct usbc_sc8280x_tbt_data *tbt = &port->tbt_data;
+ 	struct typec_thunderbolt_data tbt_data = {};
+-	u32 cable_speed;
++	u32 cable_speed, cable_flags = 0;
+ 	int ret;
+ 
++	/* PAN cable types use the same encoding as Enter_USB. */
++	switch (tbt->cable_type) {
++	case EUDO_CABLE_TYPE_PASSIVE:
++	case EUDO_CABLE_TYPE_RE_DRIVER:
++		break;
++	case EUDO_CABLE_TYPE_RE_TIMER:
++		cable_flags = TBT_CABLE_RETIMER;
++		break;
++	case EUDO_CABLE_TYPE_OPTICAL:
++		cable_flags = TBT_CABLE_OPTICAL;
++		break;
++	default:
++		dev_err(altmode->dev, "Invalid TBT3 cable type: %u\n", tbt->cable_type);
++		return;
++	}
++
+ 	/* Device Discover Mode VDO */
+ 	tbt_data.device_mode = TBT_MODE;
+ 	tbt_data.device_mode |= TBT_SET_ADAPTER(TBT_ADAPTER_TBT3);
+@@ -226,15 +257,13 @@ static void pmic_glink_altmode_enable_tbt(struct pmic_glink_altmode *altmode,
+ 	} else if (tbt->usb_speed == 1) {
+ 		cable_speed = TBT_CABLE_10_AND_20GBPS;
+ 	} else {
+-		dev_err(altmode->dev,
+-			"Got illegal TBT3 cable speed value (%u), falling back to passive\n",
+-			tbt->usb_speed);
+-		cable_speed = TBT_CABLE_USB3_PASSIVE;
++		dev_err(altmode->dev, "Invalid TBT3 cable speed: %u\n", tbt->usb_speed);
++		return;
+ 	}
+ 	tbt_data.cable_mode |= TBT_SET_CABLE_SPEED(cable_speed);
+ 
+-	if (tbt->cable_type) {
+-		tbt_data.cable_mode |= TBT_CABLE_ACTIVE_PASSIVE;
++	if (tbt->cable_type != EUDO_CABLE_TYPE_PASSIVE) {
++		tbt_data.cable_mode |= TBT_CABLE_ACTIVE_PASSIVE | cable_flags;
+ 		tbt_data.cable_mode |= TBT_SET_CABLE_ROUNDED(tbt->rounded_cable);
+ 	}
+ 
+@@ -242,8 +271,8 @@ static void pmic_glink_altmode_enable_tbt(struct pmic_glink_altmode *altmode,
+ 	tbt_data.enter_vdo |= TBT_MODE;
+ 	tbt_data.enter_vdo |= TBT_ENTER_MODE_CABLE_SPEED(cable_speed);
+ 
+-	if (tbt->cable_type) {
+-		tbt_data.enter_vdo |= TBT_CABLE_ACTIVE_PASSIVE;
++	if (tbt->cable_type != EUDO_CABLE_TYPE_PASSIVE) {
++		tbt_data.enter_vdo |= TBT_ENTER_MODE_ACTIVE_CABLE | cable_flags;
+ 		tbt_data.enter_vdo |= TBT_SET_CABLE_ROUNDED(tbt->rounded_cable);
+ 	}
+ 
+@@ -278,9 +307,13 @@ static void pmic_glink_altmode_enable_usb4(struct pmic_glink_altmode *altmode,
+ 	} else if (tbt->usb_speed == 1) {
+ 		data.eudo |= FIELD_PREP(EUDO_CABLE_SPEED_MASK, EUDO_CABLE_SPEED_USB4_GEN3);
+ 	} else {
+-		pr_err("Got illegal USB4 cable speed value (%u), falling back to G2\n",
+-		       tbt->usb_speed);
+-		data.eudo |= FIELD_PREP(EUDO_CABLE_SPEED_MASK, EUDO_CABLE_SPEED_USB4_GEN2);
++		dev_err(altmode->dev, "Invalid USB4 cable speed: %u\n", tbt->usb_speed);
++		return;
++	}
++
++	if (tbt->cable_type > EUDO_CABLE_TYPE_OPTICAL) {
++		dev_err(altmode->dev, "Invalid USB4 cable type: %u\n", tbt->cable_type);
++		return;
+ 	}
+ 
+ 	data.eudo |= FIELD_PREP(EUDO_CABLE_TYPE_MASK, tbt->cable_type);
+@@ -465,7 +498,7 @@ static void pmic_glink_altmode_sc8280xp_notify(struct pmic_glink_altmode *altmod
+ 	const struct usbc_sc8280x_tbt_data *tbt;
+ 	const struct usbc_sc8280x_dp_data *dp;
+ 	const struct usbc_notify *notify;
+-	u8 orientation;
++	u8 orientation, version, mux_ctrl, reset;
+ 	u8 port;
+ 
+ 	if (len != sizeof(*notify)) {
+@@ -477,7 +510,22 @@ static void pmic_glink_altmode_sc8280xp_notify(struct pmic_glink_altmode *altmod
+ 	notify = data;
+ 
+ 	port = notify->port_idx;
+-	orientation = notify->orientation;
++	/*
++	 * V2 pin-assignment notifications (PAN_EN argument with version 1) pack
++	 * a protocol version into bits 5-7 of the orientation byte and a reset
++	 * request into bits 5-7 of the mux byte; the DSDT's PBUF layout (BORI,
++	 * BVER, BMUX, BRST) documents the fields. Mask them off so a V2 message
++	 * does not read as an unknown orientation.
++	 */
++	orientation = notify->orientation & 0x3;
++	version = notify->orientation >> 5;
++	mux_ctrl = notify->mux_ctrl & 0xf;
++	reset = notify->mux_ctrl >> 5;
++
++	dev_info(altmode->dev,
++		 "PAN port %u orientation %u version %u mux %u reset %u vid %#x svid %#x ext %*ph\n",
++		 port, orientation, version, mux_ctrl, reset, le16_to_cpu(notify->vid),
++		 svid, (int)sizeof(notify->extended_data), &notify->extended_data);
+ 
+ 	if (port >= ARRAY_SIZE(altmode->ports) || !altmode->ports[port].altmode) {
+ 		dev_dbg(altmode->dev, "notification on undefined port %d\n", port);
+@@ -487,7 +535,7 @@ static void pmic_glink_altmode_sc8280xp_notify(struct pmic_glink_altmode *altmod
+ 	alt_port = &altmode->ports[port];
+ 	alt_port->orientation = pmic_glink_altmode_orientation(orientation);
+ 	alt_port->svid = svid;
+-	alt_port->mux_ctrl = notify->mux_ctrl;
++	alt_port->mux_ctrl = mux_ctrl;
+ 
+ 	if (svid == USB_TYPEC_DP_SID) {
+ 		dp = &notify->extended_data.dp;
+@@ -548,7 +596,10 @@ static void pmic_glink_altmode_enable_worker(struct work_struct *work)
+ 	struct pmic_glink_altmode *altmode = work_to_altmode(work);
+ 	int ret;
+ 
+-	ret = pmic_glink_altmode_request(altmode, ALTMODE_PAN_EN, 0);
++	u32 arg = pan_en_arg >= 0 ? pan_en_arg : altmode->pan_en_default;
++
++	dev_info(altmode->dev, "enabling pin-assignment notifications, PAN_EN arg %#x\n", arg);
++	ret = pmic_glink_altmode_request(altmode, ALTMODE_PAN_EN, arg);
+ 	if (ret)
+ 		dev_err(altmode->dev, "failed to request altmode notifications: %d\n", ret);
+ }
+@@ -589,6 +640,9 @@ static int pmic_glink_altmode_probe(struct auxiliary_device *adev,
+ 	else
+ 		altmode->owner_id = PMIC_GLINK_OWNER_USBC_PAN;
+ 
++	if (of_device_is_compatible(dev->parent->of_node, "qcom,glymur-pmic-glink"))
++		altmode->pan_en_default = ALTMODE_PAN_EN_V2_ARG;
++
+ 	INIT_WORK(&altmode->enable_work, pmic_glink_altmode_enable_worker);
+ 	init_completion(&altmode->pan_ack);
+ 	mutex_init(&altmode->lock);
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index 3345b3298daf359e597c93995a0891eb2d32501a..f88dc2ca11594e30b1fd9c7532858ec049ab0716 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -1934,7 +1934,8 @@ static int hub_probe(struct usb_interface *intf, const struct usb_device_id *id)
+ 	 * bus_resume methods.
+ 	 */
+ 	if (hdev->parent) {		/* normal device */
+-		usb_enable_autosuspend(hdev);
++		if (!(hdev->quirks & USB_QUIRK_NO_AUTOSUSPEND))
++			usb_enable_autosuspend(hdev);
+ 	} else {			/* root hub */
+ 		const struct hc_driver *drv = bus_to_hcd(hdev->bus)->driver;
+ 
+diff --git a/drivers/usb/dwc3/core.h b/drivers/usb/dwc3/core.h
+index 608daeb7ef1041fbafb03233b2ec4e595ee4945a..81691e6dc0bfbfd7274dad7c0a395d82b9993e01 100644
+--- a/drivers/usb/dwc3/core.h
++++ b/drivers/usb/dwc3/core.h
+@@ -140,6 +140,9 @@
+ #define DWC3_GUSB2PHYACC(n)	(0xc280 + ((n) * 0x04))
+ 
+ #define DWC3_GUSB3PIPECTL(n)	(0xc2c0 + ((n) * 0x04))
++/* Converged I/O (USB4 tunneling) control, per SuperSpeed port; DWC31 191A+ */
++#define DWC3_CIOCTRL(n)		(0xcd20 + ((n) * 0x30))
++#define DWC3_CIOCTRL_CIO_EN	BIT(0)
+ 
+ #define DWC3_GTXFIFOSIZ(n)	(0xc300 + ((n) * 0x04))
+ #define DWC3_GRXFIFOSIZ(n)	(0xc380 + ((n) * 0x04))
+diff --git a/drivers/usb/dwc3/host.c b/drivers/usb/dwc3/host.c
+index c5674161b2b08e2130c3192831014470fea8edd8..4dd3730d5c2a37ba78a7a9cc2bed04ba201a1b83 100644
+--- a/drivers/usb/dwc3/host.c
++++ b/drivers/usb/dwc3/host.c
+@@ -19,6 +19,7 @@
+ #include "../host/xhci-caps.h"
+ #include "../host/xhci-plat.h"
+ #include "core.h"
++#include "io.h"
+ 
+ #define XHCI_HCSPARAMS1		0x4
+ #define XHCI_PORTSC_BASE	0x400
+@@ -78,6 +79,27 @@ static void dwc3_xhci_plat_start(struct usb_hcd *hcd)
+ 	dwc3_enable_susphy(dwc, true);
+ }
+ 
++/*
++ * A SuperSpeed port whose CIO block is enabled carries a USB3 link tunneled
++ * over USB4 (the USB4 router owns the wire). The register block exists on
++ * CIO-capable DWC31 cores only; the "usb4-host-interface" property marks
++ * controllers whose ports can be tunneled.
++ */
++static enum usb_link_tunnel_mode dwc3_xhci_tunnel_mode(struct usb_hcd *hcd,
++						       unsigned int port)
++{
++	struct platform_device *pdev = to_platform_device(hcd->self.controller);
++	struct dwc3 *dwc = dev_get_drvdata(pdev->dev.parent);
++	u32 reg;
++
++	/* The CIO block exists on DWC31 cores only (191A and later). */
++	if (!DWC3_IP_IS(DWC31) || DWC3_VER_IS_PRIOR(DWC31, 190A))
++		return USB_LINK_UNKNOWN;
++
++	reg = dwc3_readl(dwc, DWC3_CIOCTRL(port));
++	return (reg & DWC3_CIOCTRL_CIO_EN) ? USB_LINK_TUNNELED : USB_LINK_NATIVE;
++}
++
+ static const struct xhci_plat_priv dwc3_xhci_plat_quirk = {
+ 	.plat_start = dwc3_xhci_plat_start,
+ };
+@@ -130,6 +152,7 @@ out:
+ 
+ int dwc3_host_init(struct dwc3 *dwc)
+ {
++	struct xhci_plat_priv	xhci_priv = dwc3_xhci_plat_quirk;
+ 	struct property_entry	props[6];
+ 	struct platform_device	*xhci;
+ 	int			ret, irq;
+@@ -197,7 +220,18 @@ int dwc3_host_init(struct dwc3 *dwc)
+ 		}
+ 	}
+ 
+-	ret = platform_device_add_data(xhci, &dwc3_xhci_plat_quirk,
++	if (device_property_present(dwc->dev, "usb4-host-interface")) {
++		/*
++		 * Bring-up policy: USB3 LPM (U1/U2) and port suspend over the
++		 * USB4 tunnel stall transfers on this host; keep tunneled links
++		 * in U0 until the tunnel-side power management is understood.
++		 */
++		xhci_priv = dwc3_xhci_plat_quirk;
++		xhci_priv.tunnel_mode = dwc3_xhci_tunnel_mode;
++		xhci_priv.tunneled_no_lpm = true;
++	}
++
++	ret = platform_device_add_data(xhci, &xhci_priv,
+ 				       sizeof(struct xhci_plat_priv));
+ 	if (ret)
+ 		goto err;
+diff --git a/drivers/usb/host/xhci-hub.c b/drivers/usb/host/xhci-hub.c
+index 470bafe1802be5bd2d0321703732d53d536a8cc2..f5b62b6661771c04ad70e0cdfa1788e43b8d0fa2 100644
+--- a/drivers/usb/host/xhci-hub.c
++++ b/drivers/usb/host/xhci-hub.c
+@@ -770,8 +770,11 @@ enum usb_link_tunnel_mode xhci_port_is_tunneled(struct xhci_hcd *xhci,
+ 	void __iomem *base;
+ 	u32 offset;
+ 
+-	/* Don't try and probe this capability for non-Intel hosts */
+ 	hcd = xhci_to_hcd(xhci);
++	if (xhci->port_tunnel_mode)
++		return xhci->port_tunnel_mode(hcd, port->hcd_portnum);
++
++	/* Don't try and probe this capability for non-Intel hosts */
+ 	if (!dev_is_pci(hcd->self.controller) ||
+ 	    to_pci_dev(hcd->self.controller)->vendor != PCI_VENDOR_ID_INTEL)
+ 		return USB_LINK_UNKNOWN;
+diff --git a/drivers/usb/host/xhci-plat.c b/drivers/usb/host/xhci-plat.c
+index 6fd595f81a306acf8e43b44bac66376acf60ccf6..ceeb666ffc33ce57737499888d7289d4e7dd0b83 100644
+--- a/drivers/usb/host/xhci-plat.c
++++ b/drivers/usb/host/xhci-plat.c
+@@ -90,6 +90,9 @@ static void xhci_plat_quirks(struct device *dev, struct xhci_hcd *xhci)
+ 	struct xhci_plat_priv *priv = xhci_to_priv(xhci);
+ 
+ 	xhci->quirks |= priv->quirks;
++	xhci->port_tunnel_mode = priv->tunnel_mode;
++	if (priv->tunneled_no_lpm)
++		xhci->quirks |= XHCI_TUNNELED_NO_LPM;
+ }
+ 
+ /* called during probe() after chip reset completes */
+diff --git a/drivers/usb/host/xhci-plat.h b/drivers/usb/host/xhci-plat.h
+index 00751d851831057a062ff83e05ab662b9767e992..afacdfb0893bf71b789e42a9bb0c41b64f85f55d 100644
+--- a/drivers/usb/host/xhci-plat.h
++++ b/drivers/usb/host/xhci-plat.h
+@@ -17,11 +17,15 @@ struct xhci_plat_priv {
+ 	unsigned long long quirks;
+ 	bool power_lost;
+ 	unsigned sideband_at_suspend:1;
++	/* Keep tunneled USB3 links out of U1/U2 and port suspend (bring-up policy). */
++	unsigned tunneled_no_lpm:1;
+ 	void (*plat_start)(struct usb_hcd *);
+ 	int (*init_quirk)(struct usb_hcd *);
+ 	int (*suspend_quirk)(struct usb_hcd *);
+ 	int (*resume_quirk)(struct usb_hcd *);
+ 	int (*post_resume_quirk)(struct usb_hcd *);
++	/* Platform report of a root port's USB4 tunnel state (optional). */
++	enum usb_link_tunnel_mode (*tunnel_mode)(struct usb_hcd *, unsigned int port);
+ };
+ 
+ #define hcd_to_xhci_priv(h) ((struct xhci_plat_priv *)hcd_to_xhci(h)->priv)
+diff --git a/drivers/usb/host/xhci.c b/drivers/usb/host/xhci.c
+index a9e47e178c2804da46c98b81185eb7ae8f8221ba..ade1ebd009dce73d73eaf7aff32541f986f06c12 100644
+--- a/drivers/usb/host/xhci.c
++++ b/drivers/usb/host/xhci.c
+@@ -19,6 +19,7 @@
+ #include <linux/slab.h>
+ #include <linux/string_choices.h>
+ #include <linux/dmi.h>
++#include <linux/usb/quirks.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/usb/xhci-sideband.h>
+ #include <linux/bitfield.h>
+@@ -4769,6 +4770,14 @@ static int xhci_update_device(struct usb_hcd *hcd, struct usb_device *udev)
+ 			dev_dbg(&udev->dev, "tunneled over USB4 link\n");
+ 		else if (udev->tunnel_mode == USB_LINK_NATIVE)
+ 			dev_dbg(&udev->dev, "native USB 3.x link\n");
++		if (udev->tunnel_mode == USB_LINK_TUNNELED &&
++		    (xhci->quirks & XHCI_TUNNELED_NO_LPM)) {
++			dev_info(&udev->dev,
++				 "tunneled over USB4: USB3 LPM and autosuspend disabled on this host\n");
++			udev->lpm_capable = 0;
++			udev->quirks |= USB_QUIRK_NO_AUTOSUSPEND;
++			usb_disable_autosuspend(udev);
++		}
+ 		return 0;
+ 	}
+ 
+diff --git a/drivers/usb/host/xhci.h b/drivers/usb/host/xhci.h
+index c7bfa7f028d36c07061635c55b08dc164336da22..74ac740460c7b20df4e35de72d63cde33d674f2b 100644
+--- a/drivers/usb/host/xhci.h
++++ b/drivers/usb/host/xhci.h
+@@ -1647,12 +1647,15 @@ struct xhci_hcd {
+ #define XHCI_CDNS_SCTX_QUIRK	BIT_ULL(48)
+ #define XHCI_ETRON_HOST	BIT_ULL(49)
+ #define XHCI_LIMIT_ENDPOINT_INTERVAL_9 BIT_ULL(50)
++#define XHCI_TUNNELED_NO_LPM	BIT_ULL(51)
+ 
+ 	unsigned int		num_active_eps;
+ 	unsigned int		limit_active_eps;
+ 	struct xhci_port	*hw_ports;
+ 	struct xhci_hub		usb2_rhub;
+ 	struct xhci_hub		usb3_rhub;
++	/* Platform-specific USB4 tunnel state report for a root port */
++	enum usb_link_tunnel_mode (*port_tunnel_mode)(struct usb_hcd *hcd, unsigned int port);
+ 	/* support xHCI 1.0 spec USB2 hardware LPM */
+ 	unsigned		hw_lpm_support:1;
+ 	/* Broken Suspend flag for SNPS Suspend resume issue */
+diff --git a/include/linux/usb/quirks.h b/include/linux/usb/quirks.h
+index a4043b33c2c2a5e80c40f5fa63c78380e9b608d3..1cc8641c358b3eacffb6d4dd8fd64a48557b0ad4 100644
+--- a/include/linux/usb/quirks.h
++++ b/include/linux/usb/quirks.h
+@@ -84,4 +84,7 @@
+ /* Use a 255 bytes config descriptor request mirroring windows behavior */
+ #define USB_QUIRK_WINDOWS_CONFIG_REQ_SIZE	BIT(19)
+ 
++/* Device must not be runtime suspended (set by the host controller driver) */
++#define USB_QUIRK_NO_AUTOSUSPEND		BIT(20)
++
+ #endif /* __LINUX_USB_QUIRKS_H */

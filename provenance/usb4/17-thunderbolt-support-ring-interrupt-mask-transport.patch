@@ -1,0 +1,117 @@
+--- a/drivers/thunderbolt/nhi.c
++++ b/drivers/thunderbolt/nhi.c
+@@ -78,7 +78,7 @@
+ 	int index = ring_interrupt_index(ring) / 32 * 4;
+ 	int reg = REG_RING_INTERRUPT_BASE + index;
+ 	int interrupt_bit = ring_interrupt_index(ring) & 31;
+-	int mask = 1 << interrupt_bit;
++	u32 mask = BIT(interrupt_bit);
+ 	u32 old, new;
+ 
+ 	if (ring->irq > 0) {
+@@ -128,6 +128,12 @@
+ 			  ring->vector * 4);
+ 	}
+ 
++	if (ring->nhi->ops->ring_interrupt_mask) {
++		ring->nhi->ops->ring_interrupt_mask(ring->nhi,
++						ring_interrupt_index(ring), !active);
++		return;
++	}
++
+ 	old = ioread32(ring->nhi->iobase + reg);
+ 	if (active)
+ 		new = old | mask;
+@@ -391,6 +397,11 @@
+ 	int bit = idx % 32;
+ 	u32 val;
+ 
++	if (ring->nhi->ops->ring_interrupt_mask) {
++		ring->nhi->ops->ring_interrupt_mask(ring->nhi, idx, mask);
++		return;
++	}
++
+ 	val = ioread32(ring->nhi->iobase + reg);
+ 	if (mask)
+ 		val &= ~BIT(bit);
+@@ -937,21 +948,27 @@
+  *
+  * The caller must hold @nhi->lock. This does not read or acknowledge the
+  * interrupt status. Polling rings retain their normal interrupt masking.
+- */
+-void nhi_handle_interrupt(struct tb_nhi *nhi, unsigned int cause)
++ *
++ * Return: %true if a transport that masked the captured cause may reenable it.
++ * The caller must keep @nhi->lock held until it consumes this result. Stopped,
++ * polling and interrupt-disabled rings are not rearmed, nor is an NHI that is
++ * going away. This result does not change the normal notification behavior.
++ */
++bool nhi_handle_interrupt(struct tb_nhi *nhi, unsigned int cause)
+ {
+ 	struct tb_ring *ring;
+ 	int hop, type;
++	bool rearm;
+ 
+ 	lockdep_assert_held(&nhi->lock);
+ 	if (WARN_ON_ONCE(cause >= 3 * nhi->hop_count))
+-		return;
++		return false;
+ 
+ 	type = cause / nhi->hop_count;
+ 	hop = cause % nhi->hop_count;
+ 	if (type == 2) {
+ 		dev_warn(nhi->dev, "RX overflow for ring %d\n", hop);
+-		return;
++		return false;
+ 	}
+ 	if (type == 0)
+ 		ring = nhi->tx_rings[hop];
+@@ -961,12 +978,16 @@
+ 		dev_warn(nhi->dev,
+ 			 "got interrupt for inactive %s ring %d\n",
+ 			 type ? "RX" : "TX", hop);
+-		return;
++		return false;
+ 	}
+ 
+ 	spin_lock(&ring->lock);
+ 	__ring_interrupt(ring);
++	rearm = ring->running && !ring->start_poll &&
++		!(ring->flags & RING_FLAG_NO_INTERRUPT) && !nhi->going_away;
+ 	spin_unlock(&ring->lock);
++
++	return rearm;
+ }
+ 
+ void nhi_interrupt_work(struct work_struct *work)
+--- a/drivers/thunderbolt/nhi.h
++++ b/drivers/thunderbolt/nhi.h
+@@ -31,7 +31,7 @@
+ enum nhi_fw_mode nhi_mailbox_mode(struct tb_nhi *nhi);
+ void nhi_enable_int_throttling(struct tb_nhi *nhi);
+ void nhi_disable_interrupts(struct tb_nhi *nhi);
+-void nhi_handle_interrupt(struct tb_nhi *nhi, unsigned int cause);
++bool nhi_handle_interrupt(struct tb_nhi *nhi, unsigned int cause);
+ void nhi_interrupt_work(struct work_struct *work);
+ irqreturn_t nhi_msi(int irq, void *data);
+ irqreturn_t ring_msix(int irq, void *data);
+@@ -63,6 +63,10 @@
+  * @is_present: Whether the device is currently present on the parent bus
+  * @init_interrupts: NHI specific interrupt initialization hook
+  * @reset_interface: Resets the host interface
++ * @ring_interrupt_mask: Optional per-cause mask/unmask transport. Used for
++ *	  ring activation, stop and polling; %true masks, %false unmasks.
++ *	  Called with the NHI lock held and must not sleep. Does not configure
++ *	  vectors, acknowledge status or replace controller-wide IRQ shutdown.
+  */
+ struct tb_nhi_ops {
+ 	int (*init)(struct tb_nhi *nhi);
+@@ -78,6 +82,8 @@
+ 	bool (*is_present)(struct tb_nhi *nhi);
+ 	int (*init_interrupts)(struct tb_nhi *nhi);
+ 	void (*reset_interface)(struct tb_nhi *nhi);
++	void (*ring_interrupt_mask)(struct tb_nhi *nhi, unsigned int cause,
++				    bool mask);
+ };
+ 
+ /*

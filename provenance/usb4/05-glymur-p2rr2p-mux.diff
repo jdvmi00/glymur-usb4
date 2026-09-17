@@ -1,0 +1,113 @@
+--- a/drivers/clk/qcom/gcc-glymur.c
++++ b/drivers/clk/qcom/gcc-glymur.c
+@@ -619,16 +619,6 @@
+ 	{ .index = DT_USB4_0_PHY_GCC_USB4RTR_MAX_PIPE_CLK },
+ };
+ 
+-static const struct parent_map gcc_parent_map_31[] = {
+-	{ P_USB4_0_PHY_GCC_USB4_PCIE_PIPE_CLK, 0 },
+-	{ P_BI_TCXO, 2 },
+-};
+-
+-static const struct clk_parent_data gcc_parent_data_31[] = {
+-	{ .index = DT_USB4_0_PHY_GCC_USB4_PCIE_PIPE_CLK },
+-	{ .index = DT_BI_TCXO },
+-};
+-
+ static const struct parent_map gcc_parent_map_32[] = {
+ 	{ P_BI_TCXO, 0 },
+ 	{ P_GCC_GPLL0_OUT_MAIN, 1 },
+@@ -703,16 +693,6 @@
+ 	{ .index = DT_USB4_1_PHY_GCC_USB4RTR_MAX_PIPE_CLK },
+ };
+ 
+-static const struct parent_map gcc_parent_map_39[] = {
+-	{ P_USB4_1_PHY_GCC_USB4_PCIE_PIPE_CLK, 0 },
+-	{ P_BI_TCXO, 2 },
+-};
+-
+-static const struct clk_parent_data gcc_parent_data_39[] = {
+-	{ .index = DT_USB4_1_PHY_GCC_USB4_PCIE_PIPE_CLK },
+-	{ .index = DT_BI_TCXO },
+-};
+-
+ static const struct parent_map gcc_parent_map_40[] = {
+ 	{ P_GCC_USB4_1_PHY_PCIE_PIPEGMUX_CLK_SRC, 0 },
+ 	{ P_USB4_1_PHY_GCC_USB4_PCIE_PIPE_CLK, 1 },
+@@ -787,16 +767,6 @@
+ 	{ .index = DT_USB4_2_PHY_GCC_USB4RTR_MAX_PIPE_CLK },
+ };
+ 
+-static const struct parent_map gcc_parent_map_47[] = {
+-	{ P_USB4_2_PHY_GCC_USB4_PCIE_PIPE_CLK, 0 },
+-	{ P_BI_TCXO, 2 },
+-};
+-
+-static const struct clk_parent_data gcc_parent_data_47[] = {
+-	{ .index = DT_USB4_2_PHY_GCC_USB4_PCIE_PIPE_CLK },
+-	{ .index = DT_BI_TCXO },
+-};
+-
+ static const struct parent_map gcc_parent_map_48[] = {
+ 	{ P_GCC_USB4_2_PHY_PCIE_PIPEGMUX_CLK_SRC, 0 },
+ 	{ P_USB4_2_PHY_GCC_USB4_PCIE_PIPE_CLK, 1 },
+@@ -1102,17 +1072,12 @@
+ 	},
+ };
+ 
+-static struct clk_regmap_mux gcc_usb4_0_phy_p2rr2p_pipe_clk_src = {
++static struct clk_regmap_phy_mux gcc_usb4_0_phy_p2rr2p_pipe_clk_src = {
+ 	.reg = 0x2b0f0,
+-	.shift = 0,
+-	.width = 2,
+-	.parent_map = gcc_parent_map_31,
+ 	.clkr = {
+ 		.hw.init = &(const struct clk_init_data) {
+ 			.name = "gcc_usb4_0_phy_p2rr2p_pipe_clk_src",
+-			.parent_data = gcc_parent_data_31,
+-			.num_parents = ARRAY_SIZE(gcc_parent_data_31),
+-			.ops = &clk_regmap_mux_closest_ops,
++			.ops = &clk_regmap_phy_mux_ops,
+ 		},
+ 	},
+ };
+@@ -1207,17 +1172,12 @@
+ 	},
+ };
+ 
+-static struct clk_regmap_mux gcc_usb4_1_phy_p2rr2p_pipe_clk_src = {
++static struct clk_regmap_phy_mux gcc_usb4_1_phy_p2rr2p_pipe_clk_src = {
+ 	.reg = 0x2d114,
+-	.shift = 0,
+-	.width = 2,
+-	.parent_map = gcc_parent_map_39,
+ 	.clkr = {
+ 		.hw.init = &(const struct clk_init_data) {
+ 			.name = "gcc_usb4_1_phy_p2rr2p_pipe_clk_src",
+-			.parent_data = gcc_parent_data_39,
+-			.num_parents = ARRAY_SIZE(gcc_parent_data_39),
+-			.ops = &clk_regmap_mux_closest_ops,
++			.ops = &clk_regmap_phy_mux_ops,
+ 		},
+ 	},
+ };
+@@ -1312,17 +1272,12 @@
+ 	},
+ };
+ 
+-static struct clk_regmap_mux gcc_usb4_2_phy_p2rr2p_pipe_clk_src = {
++static struct clk_regmap_phy_mux gcc_usb4_2_phy_p2rr2p_pipe_clk_src = {
+ 	.reg = 0xe00f4,
+-	.shift = 0,
+-	.width = 2,
+-	.parent_map = gcc_parent_map_47,
+ 	.clkr = {
+ 		.hw.init = &(const struct clk_init_data) {
+ 			.name = "gcc_usb4_2_phy_p2rr2p_pipe_clk_src",
+-			.parent_data = gcc_parent_data_47,
+-			.num_parents = ARRAY_SIZE(gcc_parent_data_47),
+-			.ops = &clk_regmap_mux_closest_ops,
++			.ops = &clk_regmap_phy_mux_ops,
+ 		},
+ 	},
+ };

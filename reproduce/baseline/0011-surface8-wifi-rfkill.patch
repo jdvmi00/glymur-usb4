@@ -1,0 +1,34 @@
+Subject: [BRING-UP] wifi: ath12k: skip hardware rfkill on Surface Laptop 8
+
+The saved Laptop 8 WLAN DSM function 2 returns zero; the ath12k ACPI
+flag interpretation treats a clear bit 2 as disabling hardware rfkill.
+The running device-tree boot cannot read these ACPI settings. With the
+matching Microsoft firmware, the radio initializes but is hard blocked.
+
+Use the same early-return approach proposed by Dale Whinham for Surface
+Pro 11, restricted here to Laptop 8 with WCN7850. The scoped behavior cleared the radio block and enabled scanning and
+connections on this Laptop 8. This is not a general fix or an upstream patch.
+The software radio switch remains available.
+
+Prior work: https://lists.infradead.org/pipermail/ath12k/2025-July/007490.html
+Quirk-list suggestion: https://lists.openwall.net/linux-kernel/2025/12/20/140
+
+--- a/drivers/net/wireless/ath/ath12k/core.c
++++ b/drivers/net/wireless/ath/ath12k/core.c
+@@ -83,6 +83,16 @@ static int ath12k_core_rfkill_config(struct ath12k_base *ab)
+ 	if (ath12k_acpi_get_disable_rfkill(ab))
+ 		return 0;
+ 
++	/* Laptop 8 WLAN DSM flags are unavailable during a DT boot.
++	 * Restrict this bring-up test to its on-board WCN7850.
++	 */
++	if (ab->hw_rev == ATH12K_HW_WCN7850_HW20 &&
++	    of_machine_is_compatible("microsoft,surface-laptop8")) {
++		ath12k_info(ab,
++			    "Surface Laptop 8 test: skipping hardware rfkill configuration\n");
++		return 0;
++	}
++
+ 	for (i = 0; i < ab->num_radios; i++) {
+ 		ar = ab->pdevs[i].ar;
+ 

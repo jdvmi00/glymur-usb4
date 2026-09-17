@@ -1,0 +1,619 @@
+Subject: [REVIEW 02/09] Qualcomm USB4 clocks and reset error handling
+
+Add Glymur router clock/mux operations, propagate reset errors, and expose the DP input link clock. Review register ownership, bounded polling and error unwinding.
+
+Dependencies: Base prerequisites. Used by patches 05 and 07.
+
+Source attribution: Local Surface integration; provenance/usb4/05-glymur-p2rr2p-mux.diff, 06-glymur-rx-mux.diff and 20-clk-qcom-reset-propagate-errors.patch; remaining changes are recorded in provenance/derivation.json.
+
+This is a review grouping of preserved source, not a new authorship claim or
+an independently build-validated upstream commit. Original attribution remains
+in the referenced provenance files. No new Signed-off-by trailers are added.
+
+---
+diff --git a/drivers/clk/qcom/dispcc-glymur.c b/drivers/clk/qcom/dispcc-glymur.c
+index 32cc5226b4de70e3e36d1df9a1cac649ca013397..2a9c4ae37d4ca5718967df7d9de3ea1129845747 100644
+--- a/drivers/clk/qcom/dispcc-glymur.c
++++ b/drivers/clk/qcom/dispcc-glymur.c
+@@ -787,8 +787,7 @@ static struct clk_regmap_div disp_cc_mdss_dptx0_link_dpin_div_clk_src = {
+ 			&disp_cc_mdss_dptx0_link_clk_src.clkr.hw,
+ 		},
+ 		.num_parents = 1,
+-		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_regmap_div_ro_ops,
++		.ops = &clk_regmap_div_ops,
+ 	},
+ };
+ 
+diff --git a/drivers/clk/qcom/gcc-glymur.c b/drivers/clk/qcom/gcc-glymur.c
+index 2ee4820b6fdfb1ad2cdb15366cf746651fc1a36a..96dd570b14de90c591684cb61284e8ea247b7de5 100644
+--- a/drivers/clk/qcom/gcc-glymur.c
++++ b/drivers/clk/qcom/gcc-glymur.c
+@@ -7,6 +7,7 @@
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
+ #include <linux/regmap.h>
++#include <linux/soc/qcom/glymur-usb4.h>
+ 
+ #include <dt-bindings/clock/qcom,glymur-gcc.h>
+ 
+@@ -619,16 +620,6 @@ static const struct clk_parent_data gcc_parent_data_30[] = {
+ 	{ .index = DT_USB4_0_PHY_GCC_USB4RTR_MAX_PIPE_CLK },
+ };
+ 
+-static const struct parent_map gcc_parent_map_31[] = {
+-	{ P_USB4_0_PHY_GCC_USB4_PCIE_PIPE_CLK, 0 },
+-	{ P_BI_TCXO, 2 },
+-};
+-
+-static const struct clk_parent_data gcc_parent_data_31[] = {
+-	{ .index = DT_USB4_0_PHY_GCC_USB4_PCIE_PIPE_CLK },
+-	{ .index = DT_BI_TCXO },
+-};
+-
+ static const struct parent_map gcc_parent_map_32[] = {
+ 	{ P_BI_TCXO, 0 },
+ 	{ P_GCC_GPLL0_OUT_MAIN, 1 },
+@@ -653,26 +644,6 @@ static const struct clk_parent_data gcc_parent_data_33[] = {
+ 	{ .index = DT_USB4_0_PHY_GCC_USB4_PCIE_PIPE_CLK },
+ };
+ 
+-static const struct parent_map gcc_parent_map_34[] = {
+-	{ P_QUSB4PHY_0_GCC_USB4_RX0_CLK, 0 },
+-	{ P_BI_TCXO, 2 },
+-};
+-
+-static const struct clk_parent_data gcc_parent_data_34[] = {
+-	{ .index = DT_QUSB4PHY_0_GCC_USB4_RX0_CLK },
+-	{ .index = DT_BI_TCXO },
+-};
+-
+-static const struct parent_map gcc_parent_map_35[] = {
+-	{ P_QUSB4PHY_0_GCC_USB4_RX1_CLK, 0 },
+-	{ P_BI_TCXO, 2 },
+-};
+-
+-static const struct clk_parent_data gcc_parent_data_35[] = {
+-	{ .index = DT_QUSB4PHY_0_GCC_USB4_RX1_CLK },
+-	{ .index = DT_BI_TCXO },
+-};
+-
+ static const struct parent_map gcc_parent_map_36[] = {
+ 	{ P_GCC_USB4_0_PHY_SYS_PIPEGMUX_CLK_SRC, 0 },
+ 	{ P_USB4_0_PHY_GCC_USB4_PCIE_PIPE_CLK, 2 },
+@@ -703,16 +674,6 @@ static const struct clk_parent_data gcc_parent_data_38[] = {
+ 	{ .index = DT_USB4_1_PHY_GCC_USB4RTR_MAX_PIPE_CLK },
+ };
+ 
+-static const struct parent_map gcc_parent_map_39[] = {
+-	{ P_USB4_1_PHY_GCC_USB4_PCIE_PIPE_CLK, 0 },
+-	{ P_BI_TCXO, 2 },
+-};
+-
+-static const struct clk_parent_data gcc_parent_data_39[] = {
+-	{ .index = DT_USB4_1_PHY_GCC_USB4_PCIE_PIPE_CLK },
+-	{ .index = DT_BI_TCXO },
+-};
+-
+ static const struct parent_map gcc_parent_map_40[] = {
+ 	{ P_GCC_USB4_1_PHY_PCIE_PIPEGMUX_CLK_SRC, 0 },
+ 	{ P_USB4_1_PHY_GCC_USB4_PCIE_PIPE_CLK, 1 },
+@@ -737,26 +698,6 @@ static const struct clk_parent_data gcc_parent_data_41[] = {
+ 	{ .hw = &gcc_gpll0_out_even.clkr.hw },
+ };
+ 
+-static const struct parent_map gcc_parent_map_42[] = {
+-	{ P_QUSB4PHY_1_GCC_USB4_RX0_CLK, 0 },
+-	{ P_BI_TCXO, 2 },
+-};
+-
+-static const struct clk_parent_data gcc_parent_data_42[] = {
+-	{ .index = DT_QUSB4PHY_1_GCC_USB4_RX0_CLK },
+-	{ .index = DT_BI_TCXO },
+-};
+-
+-static const struct parent_map gcc_parent_map_43[] = {
+-	{ P_QUSB4PHY_1_GCC_USB4_RX1_CLK, 0 },
+-	{ P_BI_TCXO, 2 },
+-};
+-
+-static const struct clk_parent_data gcc_parent_data_43[] = {
+-	{ .index = DT_QUSB4PHY_1_GCC_USB4_RX1_CLK },
+-	{ .index = DT_BI_TCXO },
+-};
+-
+ static const struct parent_map gcc_parent_map_44[] = {
+ 	{ P_GCC_USB4_1_PHY_SYS_PIPEGMUX_CLK_SRC, 0 },
+ 	{ P_USB4_1_PHY_GCC_USB4_PCIE_PIPE_CLK, 2 },
+@@ -787,16 +728,6 @@ static const struct clk_parent_data gcc_parent_data_46[] = {
+ 	{ .index = DT_USB4_2_PHY_GCC_USB4RTR_MAX_PIPE_CLK },
+ };
+ 
+-static const struct parent_map gcc_parent_map_47[] = {
+-	{ P_USB4_2_PHY_GCC_USB4_PCIE_PIPE_CLK, 0 },
+-	{ P_BI_TCXO, 2 },
+-};
+-
+-static const struct clk_parent_data gcc_parent_data_47[] = {
+-	{ .index = DT_USB4_2_PHY_GCC_USB4_PCIE_PIPE_CLK },
+-	{ .index = DT_BI_TCXO },
+-};
+-
+ static const struct parent_map gcc_parent_map_48[] = {
+ 	{ P_GCC_USB4_2_PHY_PCIE_PIPEGMUX_CLK_SRC, 0 },
+ 	{ P_USB4_2_PHY_GCC_USB4_PCIE_PIPE_CLK, 1 },
+@@ -807,26 +738,6 @@ static const struct clk_parent_data gcc_parent_data_48[] = {
+ 	{ .index = DT_USB4_2_PHY_GCC_USB4_PCIE_PIPE_CLK },
+ };
+ 
+-static const struct parent_map gcc_parent_map_49[] = {
+-	{ P_QUSB4PHY_2_GCC_USB4_RX0_CLK, 0 },
+-	{ P_BI_TCXO, 2 },
+-};
+-
+-static const struct clk_parent_data gcc_parent_data_49[] = {
+-	{ .index = DT_QUSB4PHY_2_GCC_USB4_RX0_CLK },
+-	{ .index = DT_BI_TCXO },
+-};
+-
+-static const struct parent_map gcc_parent_map_50[] = {
+-	{ P_QUSB4PHY_2_GCC_USB4_RX1_CLK, 0 },
+-	{ P_BI_TCXO, 2 },
+-};
+-
+-static const struct clk_parent_data gcc_parent_data_50[] = {
+-	{ .index = DT_QUSB4PHY_2_GCC_USB4_RX1_CLK },
+-	{ .index = DT_BI_TCXO },
+-};
+-
+ static const struct parent_map gcc_parent_map_51[] = {
+ 	{ P_GCC_USB4_2_PHY_SYS_PIPEGMUX_CLK_SRC, 0 },
+ 	{ P_USB4_2_PHY_GCC_USB4_PCIE_PIPE_CLK, 2 },
+@@ -1102,17 +1013,12 @@ static struct clk_regmap_mux gcc_usb4_0_phy_dp1_clk_src = {
+ 	},
+ };
+ 
+-static struct clk_regmap_mux gcc_usb4_0_phy_p2rr2p_pipe_clk_src = {
++static struct clk_regmap_phy_mux gcc_usb4_0_phy_p2rr2p_pipe_clk_src = {
+ 	.reg = 0x2b0f0,
+-	.shift = 0,
+-	.width = 2,
+-	.parent_map = gcc_parent_map_31,
+ 	.clkr = {
+ 		.hw.init = &(const struct clk_init_data) {
+ 			.name = "gcc_usb4_0_phy_p2rr2p_pipe_clk_src",
+-			.parent_data = gcc_parent_data_31,
+-			.num_parents = ARRAY_SIZE(gcc_parent_data_31),
+-			.ops = &clk_regmap_mux_closest_ops,
++			.ops = &clk_regmap_phy_mux_ops,
+ 		},
+ 	},
+ };
+@@ -1132,32 +1038,22 @@ static struct clk_regmap_mux gcc_usb4_0_phy_pcie_pipe_mux_clk_src = {
+ 	},
+ };
+ 
+-static struct clk_regmap_mux gcc_usb4_0_phy_rx0_clk_src = {
++static struct clk_regmap_phy_mux gcc_usb4_0_phy_rx0_clk_src = {
+ 	.reg = 0x2b0c0,
+-	.shift = 0,
+-	.width = 2,
+-	.parent_map = gcc_parent_map_34,
+ 	.clkr = {
+ 		.hw.init = &(const struct clk_init_data) {
+ 			.name = "gcc_usb4_0_phy_rx0_clk_src",
+-			.parent_data = gcc_parent_data_34,
+-			.num_parents = ARRAY_SIZE(gcc_parent_data_34),
+-			.ops = &clk_regmap_mux_closest_ops,
++			.ops = &clk_regmap_phy_mux_ops,
+ 		},
+ 	},
+ };
+ 
+-static struct clk_regmap_mux gcc_usb4_0_phy_rx1_clk_src = {
++static struct clk_regmap_phy_mux gcc_usb4_0_phy_rx1_clk_src = {
+ 	.reg = 0x2b0d4,
+-	.shift = 0,
+-	.width = 2,
+-	.parent_map = gcc_parent_map_35,
+ 	.clkr = {
+ 		.hw.init = &(const struct clk_init_data) {
+ 			.name = "gcc_usb4_0_phy_rx1_clk_src",
+-			.parent_data = gcc_parent_data_35,
+-			.num_parents = ARRAY_SIZE(gcc_parent_data_35),
+-			.ops = &clk_regmap_mux_closest_ops,
++			.ops = &clk_regmap_phy_mux_ops,
+ 		},
+ 	},
+ };
+@@ -1207,17 +1103,12 @@ static struct clk_regmap_mux gcc_usb4_1_phy_dp1_clk_src = {
+ 	},
+ };
+ 
+-static struct clk_regmap_mux gcc_usb4_1_phy_p2rr2p_pipe_clk_src = {
++static struct clk_regmap_phy_mux gcc_usb4_1_phy_p2rr2p_pipe_clk_src = {
+ 	.reg = 0x2d114,
+-	.shift = 0,
+-	.width = 2,
+-	.parent_map = gcc_parent_map_39,
+ 	.clkr = {
+ 		.hw.init = &(const struct clk_init_data) {
+ 			.name = "gcc_usb4_1_phy_p2rr2p_pipe_clk_src",
+-			.parent_data = gcc_parent_data_39,
+-			.num_parents = ARRAY_SIZE(gcc_parent_data_39),
+-			.ops = &clk_regmap_mux_closest_ops,
++			.ops = &clk_regmap_phy_mux_ops,
+ 		},
+ 	},
+ };
+@@ -1237,32 +1128,22 @@ static struct clk_regmap_mux gcc_usb4_1_phy_pcie_pipe_mux_clk_src = {
+ 	},
+ };
+ 
+-static struct clk_regmap_mux gcc_usb4_1_phy_rx0_clk_src = {
++static struct clk_regmap_phy_mux gcc_usb4_1_phy_rx0_clk_src = {
+ 	.reg = 0x2d0e4,
+-	.shift = 0,
+-	.width = 2,
+-	.parent_map = gcc_parent_map_42,
+ 	.clkr = {
+ 		.hw.init = &(const struct clk_init_data) {
+ 			.name = "gcc_usb4_1_phy_rx0_clk_src",
+-			.parent_data = gcc_parent_data_42,
+-			.num_parents = ARRAY_SIZE(gcc_parent_data_42),
+-			.ops = &clk_regmap_mux_closest_ops,
++			.ops = &clk_regmap_phy_mux_ops,
+ 		},
+ 	},
+ };
+ 
+-static struct clk_regmap_mux gcc_usb4_1_phy_rx1_clk_src = {
++static struct clk_regmap_phy_mux gcc_usb4_1_phy_rx1_clk_src = {
+ 	.reg = 0x2d0f8,
+-	.shift = 0,
+-	.width = 2,
+-	.parent_map = gcc_parent_map_43,
+ 	.clkr = {
+ 		.hw.init = &(const struct clk_init_data) {
+ 			.name = "gcc_usb4_1_phy_rx1_clk_src",
+-			.parent_data = gcc_parent_data_43,
+-			.num_parents = ARRAY_SIZE(gcc_parent_data_43),
+-			.ops = &clk_regmap_mux_closest_ops,
++			.ops = &clk_regmap_phy_mux_ops,
+ 		},
+ 	},
+ };
+@@ -1312,17 +1193,12 @@ static struct clk_regmap_mux gcc_usb4_2_phy_dp1_clk_src = {
+ 	},
+ };
+ 
+-static struct clk_regmap_mux gcc_usb4_2_phy_p2rr2p_pipe_clk_src = {
++static struct clk_regmap_phy_mux gcc_usb4_2_phy_p2rr2p_pipe_clk_src = {
+ 	.reg = 0xe00f4,
+-	.shift = 0,
+-	.width = 2,
+-	.parent_map = gcc_parent_map_47,
+ 	.clkr = {
+ 		.hw.init = &(const struct clk_init_data) {
+ 			.name = "gcc_usb4_2_phy_p2rr2p_pipe_clk_src",
+-			.parent_data = gcc_parent_data_47,
+-			.num_parents = ARRAY_SIZE(gcc_parent_data_47),
+-			.ops = &clk_regmap_mux_closest_ops,
++			.ops = &clk_regmap_phy_mux_ops,
+ 		},
+ 	},
+ };
+@@ -1342,32 +1218,22 @@ static struct clk_regmap_mux gcc_usb4_2_phy_pcie_pipe_mux_clk_src = {
+ 	},
+ };
+ 
+-static struct clk_regmap_mux gcc_usb4_2_phy_rx0_clk_src = {
++static struct clk_regmap_phy_mux gcc_usb4_2_phy_rx0_clk_src = {
+ 	.reg = 0xe00c4,
+-	.shift = 0,
+-	.width = 2,
+-	.parent_map = gcc_parent_map_49,
+ 	.clkr = {
+ 		.hw.init = &(const struct clk_init_data) {
+ 			.name = "gcc_usb4_2_phy_rx0_clk_src",
+-			.parent_data = gcc_parent_data_49,
+-			.num_parents = ARRAY_SIZE(gcc_parent_data_49),
+-			.ops = &clk_regmap_mux_closest_ops,
++			.ops = &clk_regmap_phy_mux_ops,
+ 		},
+ 	},
+ };
+ 
+-static struct clk_regmap_mux gcc_usb4_2_phy_rx1_clk_src = {
++static struct clk_regmap_phy_mux gcc_usb4_2_phy_rx1_clk_src = {
+ 	.reg = 0xe00d8,
+-	.shift = 0,
+-	.width = 2,
+-	.parent_map = gcc_parent_map_50,
+ 	.clkr = {
+ 		.hw.init = &(const struct clk_init_data) {
+ 			.name = "gcc_usb4_2_phy_rx1_clk_src",
+-			.parent_data = gcc_parent_data_50,
+-			.num_parents = ARRAY_SIZE(gcc_parent_data_50),
+-			.ops = &clk_regmap_mux_closest_ops,
++			.ops = &clk_regmap_phy_mux_ops,
+ 		},
+ 	},
+ };
+@@ -8476,6 +8342,11 @@ static const struct qcom_reset_map gcc_glymur_resets[] = {
+ 	[GCC_VIDEO_AXI1_CLK_ARES] = { 0x32044, 2 },
+ 	[GCC_VIDEO_BCR] = { 0x32000 },
+ 	[GCC_VIDEO_AXI0C_CLK_ARES] = { 0x32030, 2 },
++	[GCC_USB4PHY_0_PHY_PRIM_BCR] = { 0xdb01c },
++	[GCC_USB4PHY_1_PHY_SEC_BCR] = { 0x2c01c },
++	[GCC_USB4PHY_2_PHY_TERT_BCR] = { 0xbe01c },
++	[GCC_USB4_1_DP0_PHY_SEC_BCR] = { 0x2c010 },
++	[GCC_USB4_2_DP0_PHY_TERT_BCR] = { 0xbe010 },
+ };
+ 
+ static const struct clk_rcg_dfs_data gcc_dfs_clocks[] = {
+@@ -8558,9 +8429,144 @@ static const struct of_device_id gcc_glymur_match_table[] = {
+ };
+ MODULE_DEVICE_TABLE(of, gcc_glymur_match_table);
+ 
++/*
++ * USB4 host router startup operations. The router frontend cannot express
++ * these through clock or reset consumers: the RX muxes must run from TCXO
++ * with their gates enabled across the router reset, the memory-force and
++ * clock-gating bits are toggled at fixed points of the firmware sequence,
++ * and the opaque control bit has no verified signal name.
++ */
++struct glymur_usb4_gcc_regs {
++	u32 ctrl;
++	u32 sys;
++	u32 pipe;
++	u32 rx_gate[2];
++	u32 rx_mux[2];
++};
++
++static const struct glymur_usb4_gcc_regs glymur_usb4_gcc_regs[] = {
++	[0] = {
++		.ctrl = 0x600c0,
++		.sys = 0x2b05c,
++		.pipe = 0x2b0bc,
++		.rx_gate = { 0x2b0c4, 0x2b0d8 },
++		.rx_mux = { 0x2b0c0, 0x2b0d4 },
++	},
++	[1] = {
++		.ctrl = 0x600ac,
++		.sys = 0x2d05c,
++		.pipe = 0x2d0e0,
++		.rx_gate = { 0x2d0e8, 0x2d0fc },
++		.rx_mux = { 0x2d0e4, 0x2d0f8 },
++	},
++};
++
++#define GLYMUR_USB4_RX_MUX_MASK		GENMASK(1, 0)
++#define GLYMUR_USB4_RX_MUX_PHY		0
++#define GLYMUR_USB4_RX_MUX_TCXO		2
++#define GLYMUR_USB4_CTRL_BIT		BIT(3)
++#define GLYMUR_USB4_PIPE_HWCG_BIT	BIT(1)
++
++static struct regmap *glymur_gcc_regmap;
++
++static const struct glymur_usb4_gcc_regs *glymur_usb4_regs(unsigned int port)
++{
++	if (!glymur_gcc_regmap || port >= ARRAY_SIZE(glymur_usb4_gcc_regs))
++		return NULL;
++	return &glymur_usb4_gcc_regs[port];
++}
++
++int glymur_gcc_usb4_rx_select(unsigned int port, bool phy)
++{
++	const struct glymur_usb4_gcc_regs *r = glymur_usb4_regs(port);
++	u32 want = phy ? GLYMUR_USB4_RX_MUX_PHY : GLYMUR_USB4_RX_MUX_TCXO;
++	u32 cur[2];
++	int i, ret;
++
++	if (!r)
++		return -ENODEV;
++	for (i = 0; i < 2; i++) {
++		ret = regmap_read(glymur_gcc_regmap, r->rx_mux[i], &cur[i]);
++		if (ret)
++			return ret;
++	}
++	if ((cur[0] & GLYMUR_USB4_RX_MUX_MASK) == want &&
++	    (cur[1] & GLYMUR_USB4_RX_MUX_MASK) == want)
++		return 0;
++	for (i = 0; i < 2; i++) {
++		ret = regmap_update_bits(glymur_gcc_regmap, r->rx_gate[i], BIT(0), 0);
++		if (ret)
++			return ret;
++	}
++	for (i = 0; i < 2; i++) {
++		ret = regmap_update_bits(glymur_gcc_regmap, r->rx_mux[i],
++					 GLYMUR_USB4_RX_MUX_MASK, want);
++		if (ret)
++			return ret;
++	}
++	for (i = 0; i < 2; i++) {
++		ret = regmap_update_bits(glymur_gcc_regmap, r->rx_gate[i], BIT(0), BIT(0));
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++EXPORT_SYMBOL_GPL(glymur_gcc_usb4_rx_select);
++
++int glymur_gcc_usb4_ctrl_bit(unsigned int port, bool set)
++{
++	const struct glymur_usb4_gcc_regs *r = glymur_usb4_regs(port);
++
++	if (!r)
++		return -ENODEV;
++	return regmap_update_bits(glymur_gcc_regmap, r->ctrl, GLYMUR_USB4_CTRL_BIT,
++				  set ? GLYMUR_USB4_CTRL_BIT : 0);
++}
++EXPORT_SYMBOL_GPL(glymur_gcc_usb4_ctrl_bit);
++
++int glymur_gcc_usb4_sys_force_mem(unsigned int port, bool on)
++{
++	const struct glymur_usb4_gcc_regs *r = glymur_usb4_regs(port);
++
++	if (!r)
++		return -ENODEV;
++	return regmap_update_bits(glymur_gcc_regmap, r->sys, CBCR_FORCE_MEM_CORE_ON,
++				  on ? CBCR_FORCE_MEM_CORE_ON : 0);
++}
++EXPORT_SYMBOL_GPL(glymur_gcc_usb4_sys_force_mem);
++
++int glymur_gcc_usb4_pipe_hwcg(unsigned int port, bool enable)
++{
++	const struct glymur_usb4_gcc_regs *r = glymur_usb4_regs(port);
++
++	if (!r)
++		return -ENODEV;
++	return regmap_update_bits(glymur_gcc_regmap, r->pipe, GLYMUR_USB4_PIPE_HWCG_BIT,
++				  enable ? GLYMUR_USB4_PIPE_HWCG_BIT : 0);
++}
++EXPORT_SYMBOL_GPL(glymur_gcc_usb4_pipe_hwcg);
++
++int glymur_gcc_usb4_sys_ready(unsigned int port, unsigned int timeout_us)
++{
++	const struct glymur_usb4_gcc_regs *r = glymur_usb4_regs(port);
++	u32 val;
++
++	if (!r)
++		return -ENODEV;
++	return regmap_read_poll_timeout(glymur_gcc_regmap, r->sys, val,
++					!(val & CBCR_CLK_OFF), 10, timeout_us);
++}
++EXPORT_SYMBOL_GPL(glymur_gcc_usb4_sys_ready);
++
+ static int gcc_glymur_probe(struct platform_device *pdev)
+ {
+-	return qcom_cc_probe(pdev, &gcc_glymur_desc);
++	int ret;
++
++	ret = qcom_cc_probe(pdev, &gcc_glymur_desc);
++	if (ret)
++		return ret;
++	glymur_gcc_regmap = dev_get_regmap(&pdev->dev, NULL);
++	return 0;
+ }
+ 
+ static struct platform_driver gcc_glymur_driver = {
+diff --git a/drivers/clk/qcom/reset.c b/drivers/clk/qcom/reset.c
+index d96c96a9089f40b3a111067434d4d19632505a16..a3aa4e1568766fac5a6d86ced64d8554498b4168 100644
+--- a/drivers/clk/qcom/reset.c
++++ b/drivers/clk/qcom/reset.c
+@@ -14,12 +14,14 @@
+ static int qcom_reset(struct reset_controller_dev *rcdev, unsigned long id)
+ {
+ 	struct qcom_reset_controller *rst = to_qcom_reset_controller(rcdev);
++	int ret;
+ 
+-	rcdev->ops->assert(rcdev, id);
++	ret = rcdev->ops->assert(rcdev, id);
++	if (ret)
++		return ret;
+ 	fsleep(rst->reset_map[id].udelay ?: 1); /* use 1 us as default */
+ 
+-	rcdev->ops->deassert(rcdev, id);
+-	return 0;
++	return rcdev->ops->deassert(rcdev, id);
+ }
+ 
+ static int qcom_reset_set_assert(struct reset_controller_dev *rcdev,
+@@ -28,17 +30,18 @@ static int qcom_reset_set_assert(struct reset_controller_dev *rcdev,
+ 	struct qcom_reset_controller *rst;
+ 	const struct qcom_reset_map *map;
+ 	u32 mask;
++	int ret;
+ 
+ 	rst = to_qcom_reset_controller(rcdev);
+ 	map = &rst->reset_map[id];
+ 	mask = map->bitmask ? map->bitmask : BIT(map->bit);
+ 
+-	regmap_update_bits(rst->regmap, map->reg, mask, assert ? mask : 0);
++	ret = regmap_update_bits(rst->regmap, map->reg, mask, assert ? mask : 0);
++	if (ret)
++		return ret;
+ 
+ 	/* Read back the register to ensure write completion, ignore the value */
+-	regmap_read(rst->regmap, map->reg, &mask);
+-
+-	return 0;
++	return regmap_read(rst->regmap, map->reg, &mask);
+ }
+ 
+ static int qcom_reset_assert(struct reset_controller_dev *rcdev, unsigned long id)
+diff --git a/include/dt-bindings/clock/qcom,glymur-gcc.h b/include/dt-bindings/clock/qcom,glymur-gcc.h
+index 6907653c79927f0ff32c98c75d830b719ce14d51..22f6e23747d1f8d14cbc6b891af03146667214db 100644
+--- a/include/dt-bindings/clock/qcom,glymur-gcc.h
++++ b/include/dt-bindings/clock/qcom,glymur-gcc.h
+@@ -576,4 +576,10 @@
+ #define GCC_VIDEO_BCR						91
+ #define GCC_VIDEO_AXI0C_CLK_ARES				92
+ 
++#define GCC_USB4PHY_0_PHY_PRIM_BCR				93
++#define GCC_USB4PHY_1_PHY_SEC_BCR				94
++#define GCC_USB4PHY_2_PHY_TERT_BCR				95
++#define GCC_USB4_1_DP0_PHY_SEC_BCR				96
++#define GCC_USB4_2_DP0_PHY_TERT_BCR				97
++
+ #endif
+diff --git a/include/linux/soc/qcom/glymur-usb4.h b/include/linux/soc/qcom/glymur-usb4.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..dc3d5d5eb02cc6ca94c4c3708b8dafaa2583c931
+--- /dev/null
++++ b/include/linux/soc/qcom/glymur-usb4.h
+@@ -0,0 +1,53 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Glymur GCC operations required by the USB4 host router startup sequence.
++ *
++ * These registers belong to the global clock controller but are not ordinary
++ * clock enables: the recovered router startup toggles them at fixed points
++ * between resets, firmware upload and PHY initialization. They are exposed as
++ * narrow checked operations owned by the GCC driver, not as fake clocks or
++ * resets. Only the port table entries verified on the Surface Laptop 8 are
++ * populated.
++ */
++#ifndef __LINUX_SOC_QCOM_GLYMUR_USB4_H
++#define __LINUX_SOC_QCOM_GLYMUR_USB4_H
++
++#include <linux/errno.h>
++#include <linux/types.h>
++
++#if IS_ENABLED(CONFIG_CLK_GLYMUR_GCC)
++/* Switch both RX clock muxes: gates off, selectors to PHY (true) or TCXO, gates on. */
++int glymur_gcc_usb4_rx_select(unsigned int port, bool phy);
++/* Opaque control bit 3 (GCC 0x600c0 for port 0) pulsed around router 0x81018. */
++int glymur_gcc_usb4_ctrl_bit(unsigned int port, bool set);
++/* CBCR_FORCE_MEM_CORE_ON on the router SYS branch, after firmware upload. */
++int glymur_gcc_usb4_sys_force_mem(unsigned int port, bool on);
++/* Hardware clock gating bit of the USB PIPE branch. */
++int glymur_gcc_usb4_pipe_hwcg(unsigned int port, bool enable);
++/* Poll the SYS branch CLK_OFF status clear after reset deassert. */
++int glymur_gcc_usb4_sys_ready(unsigned int port, unsigned int timeout_us);
++#else
++static inline int glymur_gcc_usb4_rx_select(unsigned int port, bool phy)
++{
++	return -ENODEV;
++}
++static inline int glymur_gcc_usb4_ctrl_bit(unsigned int port, bool set)
++{
++	return -ENODEV;
++}
++static inline int glymur_gcc_usb4_sys_force_mem(unsigned int port, bool on)
++{
++	return -ENODEV;
++}
++static inline int glymur_gcc_usb4_pipe_hwcg(unsigned int port, bool enable)
++{
++	return -ENODEV;
++}
++static inline int glymur_gcc_usb4_sys_ready(unsigned int port,
++					    unsigned int timeout_us)
++{
++	return -ENODEV;
++}
++#endif
++
++#endif

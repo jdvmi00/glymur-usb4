@@ -1,0 +1,44 @@
+From: Jim Martin <jimmartin@gmail.com>
+Subject: [PATCH] phy: qcom-qmp-combo: glymur: let the DP lane pair follow the orientation
+
+On the Glymur USB43DP combo PHY the DP TX blocks are the USB3 lane blocks,
+and the block USB3 occupies follows the physical cable orientation (block A
+in normal, block B in reverse orientation, selected through
+QPHY_V3_DP_COM_TYPEC_CTRL).  The DP PCS lane-pair selection was forced to
+lanes 2/3 through dp_mode_ignore_reverse, so in reverse orientation DP
+kept its PCS on the pair that carries the live USB3 link while the lane
+table went into the other block: every reverse-orientation replug on a
+Surface Laptop 8 failed link training at the first repeater with USB3
+unaffected, and every normal-orientation replug worked.
+
+Let the DP PCS lane pair follow the orientation like every other QMP combo
+PHY: lanes 0/1 (block A, DP_PHY_MODE 0x4c) in reverse, lanes 2/3 (block B,
+0x5c) in normal orientation.  This matches the reverse-dependent
+driver-enable and bias selection qmp_v8_configure_dp_phy() already makes.
+
+Signed-off-by: Jim Martin <jimmartin@gmail.com>
+---
+--- a/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
++++ b/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
+@@ -3469,7 +3469,6 @@
+ 
+ 	.dp_aux_cfg2		= QSERDES_DP_PHY_AUX_CFG2_V8,
+ 	.dp_phy_cfg1		= QSERDES_DP_PHY_CFG1_V8,
+-	.dp_mode_ignore_reverse	= true,
+ 	.dp_lanes_exclusive	= true,
+ 
+ 	.regs			= qmp_v8_n3_usb43dpphy_regs_layout,
+@@ -3490,9 +3489,10 @@
+  * only the block that carries its lanes while USB3 shares the port (USB3DP
+  * mode, DP on two or one lanes).  The block USB3 occupies follows the cable
+  * orientation (block A in normal, block B in reverse orientation), so DP
+- * takes the other one: block B in normal, block A in reverse.  This is
+- * independent of dp_mode_ignore_reverse, which only concerns the DP PCS's
+- * own lane numbering.  In DP-only mode DP owns both blocks.
++ * takes the other one: block B in normal, block A in reverse.  The DP PCS
++ * lane-pair selection (qmp_combo_configure_dp_mode()) has to follow the
++ * orientation as well, so dp_mode_ignore_reverse must stay clear on such a
++ * PHY.  In DP-only mode DP owns both blocks.
+  */
+ static void qmp_combo_dp_lane_blocks(struct qmp_combo *qmp, bool *use_tx,
+ 				     bool *use_tx2)
