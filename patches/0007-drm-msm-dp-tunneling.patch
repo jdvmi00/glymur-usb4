@@ -1,6 +1,6 @@
 Subject: [REVIEW 07/09] DisplayPort tunneling, FEC and DSC startup
 
-Integrate the USB4 provider with DP startup/shutdown, AUX/segmented EDID, FEC readiness and acknowledgment, DSC selection, and interrupt/clock sequencing. Review all failure paths and native-DP behavior.
+Integrate the USB4 provider with DP startup/shutdown, AUX/segmented EDID, FEC readiness and acknowledgment, DSC selection, and interrupt/clock sequencing. Review all failure paths and native-DP behavior. Native HPD notifications are handled in a worker, so the notifier never waits for AUX, and a withdrawn HPD stops AUX transfers to the departed sink.
 
 Dependencies: Patch 05 supplies the usb4-dp.h provider interface and patch 06 the DPU side. Patch 02 is a runtime dependency rather than a symbol reference: dp_ctrl.c sets the DP input link clock rate, which needs the writable dispcc divider from 02 through the board clock bindings in 08-09. Patches 05-07 form a coupled host/display integration, not independently validated features.
 
@@ -1516,7 +1516,7 @@ index cf3838fcd154e67b6bd8f6321a8711419543abcb..5d5ebcb7bc8e3d00c0831a4b50513bf5
  	/* Link Information */
  	seq_printf(seq, "\tdp_link:\n\t\ttest_requested = %d\n",
 diff --git a/drivers/gpu/drm/msm/dp/dp_display.c b/drivers/gpu/drm/msm/dp/dp_display.c
-index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c40257f8ba 100644
+index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e19f9ffd2 100644
 --- a/drivers/gpu/drm/msm/dp/dp_display.c
 +++ b/drivers/gpu/drm/msm/dp/dp_display.c
 @@ -12,6 +12,9 @@
@@ -1529,7 +1529,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  #include <drm/display/drm_dp_aux_bus.h>
  #include <drm/display/drm_hdmi_audio_helper.h>
  #include <drm/drm_edid.h>
-@@ -51,8 +54,19 @@ struct msm_dp_display_private {
+@@ -51,11 +54,33 @@ struct msm_dp_display_private {
  	/* state variables */
  	bool core_initialized;
  	bool phy_initialized;
@@ -1549,16 +1549,31 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  	struct mutex plugged_lock;
  	bool plugged;
  
-@@ -202,6 +216,8 @@ void msm_dp_display_signal_audio_complete(struct msm_dp *msm_dp_display)
++	/*
++	 * Latest status from hpd_notify(), handled by hpd_work. A Type-C port
++	 * can report HPD and withdraw it again before the sink ever answers
++	 * AUX; the notifier must neither block on those transfers nor have a
++	 * disconnect wait behind them.
++	 */
++	struct work_struct hpd_work;
++	enum drm_connector_status hpd_status;	/* from the HPD source */
++	enum drm_connector_status work_status;	/* to apply, also detect's */
++	struct task_struct *detect_task;	/* detect() awaiting its echo */
++
+ 	struct drm_device *drm_dev;
+ 
+ 	struct drm_dp_aux *aux;
+@@ -202,6 +227,9 @@ void msm_dp_display_signal_audio_complete(struct msm_dp *msm_dp_display)
  	complete_all(&dp->audio_comp);
  }
  
 +static void msm_dp_usb4_detach_locked(struct device *dev);
++static void msm_dp_hpd_work(struct work_struct *work);
 +
  static int msm_dp_display_bind(struct device *dev, struct device *master,
  			   void *data)
  {
-@@ -221,6 +237,9 @@ static int msm_dp_display_bind(struct device *dev, struct device *master,
+@@ -221,6 +249,9 @@ static int msm_dp_display_bind(struct device *dev, struct device *master,
  		goto end;
  	}
  
@@ -1568,7 +1583,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  	return 0;
  end:
  	return rc;
-@@ -232,6 +251,12 @@ static void msm_dp_display_unbind(struct device *dev, struct device *master,
+@@ -232,6 +263,12 @@ static void msm_dp_display_unbind(struct device *dev, struct device *master,
  	struct msm_dp_display_private *dp = dev_get_dp_display_private(dev);
  	struct msm_drm_private *priv = dev_get_drvdata(master);
  
@@ -1581,7 +1596,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  	of_dp_aux_depopulate_bus(dp->aux);
  
  	msm_dp_aux_unregister(dp->aux);
-@@ -322,22 +347,36 @@ end:
+@@ -322,22 +359,36 @@ end:
   *
   * Prepare DP PHY for the AUX transactions to succeed.
   *
@@ -1624,7 +1639,21 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  }
  
  static void msm_dp_display_host_phy_exit(struct msm_dp_display_private *dp)
-@@ -417,9 +456,13 @@ static int msm_dp_hpd_plug_handle(struct msm_dp_display_private *dp)
+@@ -400,6 +451,13 @@ static int msm_dp_display_handle_irq_hpd(struct msm_dp_display_private *dp)
+ 	return 0;
+ }
+ 
++/* The native sink was reported gone; a USB4 tunnel reports HPD separately. */
++static bool msm_dp_display_hpd_gone(struct msm_dp_display_private *dp)
++{
++	return READ_ONCE(dp->hpd_status) == connector_status_disconnected &&
++	       !msm_dp_aux_usb4_attached(dp->aux);
++}
++
+ static int msm_dp_hpd_plug_handle(struct msm_dp_display_private *dp)
+ {
+ 	int ret;
+@@ -417,9 +475,17 @@ static int msm_dp_hpd_plug_handle(struct msm_dp_display_private *dp)
  		return ret;
  	}
  
@@ -1637,10 +1666,14 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  
 -	msm_dp_display_host_phy_init(dp);
 +	msm_dp_aux_enable_xfers(dp->aux, true);
++	/* Pairs with the barrier in msm_dp_bridge_hpd_notify(). */
++	smp_mb();
++	if (msm_dp_display_hpd_gone(dp))
++		msm_dp_aux_enable_xfers(dp->aux, false);
  
  	ret = msm_dp_display_process_hpd_high(dp);
  
-@@ -452,6 +495,7 @@ static int msm_dp_hpd_unplug_handle(struct msm_dp_display_private *dp)
+@@ -452,6 +518,7 @@ static int msm_dp_hpd_unplug_handle(struct msm_dp_display_private *dp)
  
  	dp->panel->video_test = false;
  
@@ -1648,7 +1681,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  	msm_dp_aux_enable_xfers(dp->aux, false);
  
  	drm_dbg_dp(dp->drm_dev, "Before, type=%d sink_count=%d\n",
-@@ -488,7 +532,9 @@ static int msm_dp_hpd_unplug_handle(struct msm_dp_display_private *dp)
+@@ -488,7 +555,9 @@ static int msm_dp_hpd_unplug_handle(struct msm_dp_display_private *dp)
  			dp->link->sink_count);
  
  	if (dp->plugged) {
@@ -1658,7 +1691,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  		dp->plugged = false;
  	}
  
-@@ -523,6 +569,212 @@ static int msm_dp_irq_hpd_handle(struct msm_dp_display_private *dp)
+@@ -523,6 +592,212 @@ static int msm_dp_irq_hpd_handle(struct msm_dp_display_private *dp)
  	return rc;
  }
  
@@ -1871,7 +1904,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  static void msm_dp_display_deinit_sub_modules(struct msm_dp_display_private *dp)
  {
  	msm_dp_audio_put(dp->audio);
-@@ -595,6 +847,12 @@ error:
+@@ -595,6 +870,12 @@ error:
  	return rc;
  }
  
@@ -1884,7 +1917,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  static int msm_dp_display_set_mode(struct msm_dp *msm_dp_display,
  				   const struct drm_display_mode *adjusted_mode,
  				   struct msm_dp_panel *msm_dp_panel)
-@@ -611,6 +869,24 @@ static int msm_dp_display_set_mode(struct msm_dp *msm_dp_display,
+@@ -611,6 +892,24 @@ static int msm_dp_display_set_mode(struct msm_dp *msm_dp_display,
  
  	msm_dp_panel_init_panel_info(msm_dp_panel, adjusted_mode, bpp ? bpp : 24);
  
@@ -1909,7 +1942,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  	/* populate wide_bus_support to different layers */
  	dp->ctrl->wide_bus_en =
  		msm_dp_panel->msm_dp_mode.out_fmt_is_yuv_420 ? false : dp->wide_bus_supported;
-@@ -625,8 +901,11 @@ static int msm_dp_display_prepare_link(struct msm_dp_display_private *dp)
+@@ -625,8 +924,11 @@ static int msm_dp_display_prepare_link(struct msm_dp_display_private *dp)
  
  	drm_dbg_dp(dp->drm_dev, "sink_count=%d\n", dp->link->sink_count);
  
@@ -1923,7 +1956,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  
  	rc = pm_runtime_resume_and_get(&msm_dp_display->pdev->dev);
  	if (rc) {
-@@ -634,11 +913,15 @@ static int msm_dp_display_prepare_link(struct msm_dp_display_private *dp)
+@@ -634,11 +936,15 @@ static int msm_dp_display_prepare_link(struct msm_dp_display_private *dp)
  		return rc;
  	}
  
@@ -1940,7 +1973,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  		force_link_train = true;
  	}
  
-@@ -649,6 +932,12 @@ static int msm_dp_display_prepare_link(struct msm_dp_display_private *dp)
+@@ -649,6 +955,12 @@ static int msm_dp_display_prepare_link(struct msm_dp_display_private *dp)
  		return rc;
  	}
  
@@ -1953,7 +1986,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  	return msm_dp_ctrl_prepare_stream_on(dp->ctrl, dp->panel, force_link_train);
  }
  
-@@ -740,6 +1029,146 @@ static int msm_dp_display_disable(struct msm_dp_display_private *dp,
+@@ -740,6 +1052,146 @@ static int msm_dp_display_disable(struct msm_dp_display_private *dp,
  	return 0;
  }
  
@@ -2100,7 +2133,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  /**
   * msm_dp_display_mode_valid - callback to determine if specified mode is valid
   * @dp: Pointer to dp display structure
-@@ -751,50 +1180,91 @@ enum drm_mode_status msm_dp_display_mode_valid(struct msm_dp *dp,
+@@ -751,50 +1203,91 @@ enum drm_mode_status msm_dp_display_mode_valid(struct msm_dp *dp,
  					       const struct drm_display_info *info,
  					       const struct drm_display_mode *mode)
  {
@@ -2220,7 +2253,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  }
  
  int msm_dp_display_get_modes(struct msm_dp *dp)
-@@ -899,6 +1369,12 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
+@@ -899,6 +1392,23 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
  
  	priv = container_of(dp, struct msm_dp_display_private, msm_dp_display);
  
@@ -2230,10 +2263,21 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
 +			priv->link->sink_count ? connector_status_connected :
 +			connector_status_disconnected;
 +
++	/*
++	 * The bridge connector passes this result to hpd_notify() right after
++	 * detect() returns; mark that call so it is not taken for the HPD
++	 * source reporting the sink gone.
++	 */
++	WRITE_ONCE(priv->detect_task, current);
++
++	/* No AUX transfer can reach a sink whose HPD was withdrawn. */
++	if (msm_dp_display_hpd_gone(priv))
++		return status;
++
  	guard(mutex)(&priv->plugged_lock);
  	ret = pm_runtime_resume_and_get(&dp->pdev->dev);
  	if (ret) {
-@@ -906,7 +1382,12 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
+@@ -906,9 +1416,19 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
  		return status;
  	}
  
@@ -2246,27 +2290,38 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
 +	phy_deinit = ret;
  
  	msm_dp_aux_enable_xfers(priv->aux, true);
++	smp_mb();
++	if (msm_dp_display_hpd_gone(priv)) {
++		msm_dp_aux_enable_xfers(priv->aux, false);
++		goto end;
++	}
  
-@@ -1216,6 +1697,10 @@ static int msm_dp_display_probe(struct platform_device *pdev)
+ 	ret = msm_dp_aux_is_link_connected(priv->aux);
+ 	DRM_DEBUG_DP("aux link status: %x\n", ret);
+@@ -1216,6 +1736,13 @@ static int msm_dp_display_probe(struct platform_device *pdev)
  	dp->hpd_isr_status = 0;
  
  	mutex_init(&dp->plugged_lock);
 +	mutex_init(&dp->usb4_lock);
 +	mutex_init(&dp->usb4_link_lock);
 +	INIT_WORK(&dp->usb4_hpd_work, msm_dp_usb4_hpd_work);
++	INIT_WORK(&dp->hpd_work, msm_dp_hpd_work);
++	dp->hpd_status = connector_status_unknown;
++	dp->work_status = connector_status_unknown;
 +	init_waitqueue_head(&dp->usb4_stop_wait);
  
  	rc = msm_dp_display_get_io(dp);
  	if (rc)
-@@ -1265,6 +1750,7 @@ static void msm_dp_display_remove(struct platform_device *pdev)
+@@ -1265,6 +1792,8 @@ static void msm_dp_display_remove(struct platform_device *pdev)
  {
  	struct msm_dp_display_private *dp = dev_get_dp_display_private(&pdev->dev);
  
 +	msm_dp_usb4_detach_locked(&pdev->dev);
++	cancel_work_sync(&dp->hpd_work);
  	component_del(&pdev->dev, &msm_dp_display_comp_ops);
  	msm_dp_display_deinit_sub_modules(dp);
  	platform_set_drvdata(pdev, NULL);
-@@ -1274,13 +1760,17 @@ static int msm_dp_pm_runtime_suspend(struct device *dev)
+@@ -1274,13 +1803,17 @@ static int msm_dp_pm_runtime_suspend(struct device *dev)
  {
  	struct msm_dp_display_private *dp = dev_get_dp_display_private(dev);
  
@@ -2284,7 +2339,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  
  	return 0;
  }
-@@ -1288,6 +1778,7 @@ static int msm_dp_pm_runtime_suspend(struct device *dev)
+@@ -1288,6 +1821,7 @@ static int msm_dp_pm_runtime_suspend(struct device *dev)
  static int msm_dp_pm_runtime_resume(struct device *dev)
  {
  	struct msm_dp_display_private *dp = dev_get_dp_display_private(dev);
@@ -2292,7 +2347,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  
  	/*
  	 * for eDP, host cotroller, HPD block and PHY are enabled here
-@@ -1297,10 +1788,17 @@ static int msm_dp_pm_runtime_resume(struct device *dev)
+@@ -1297,10 +1831,17 @@ static int msm_dp_pm_runtime_resume(struct device *dev)
  	 * HPD block is enabled at msm_dp_bridge_hpd_enable()
  	 * PHY will be enabled at plugin handler later
  	 */
@@ -2311,7 +2366,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  	}
  
  	enable_irq(dp->irq);
-@@ -1313,6 +1811,128 @@ static const struct dev_pm_ops msm_dp_pm_ops = {
+@@ -1313,6 +1854,128 @@ static const struct dev_pm_ops msm_dp_pm_ops = {
  				pm_runtime_force_resume)
  };
  
@@ -2440,7 +2495,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  static struct platform_driver msm_dp_display_driver = {
  	.probe  = msm_dp_display_probe,
  	.remove = msm_dp_display_remove,
-@@ -1321,6 +1941,7 @@ static struct platform_driver msm_dp_display_driver = {
+@@ -1321,6 +1984,7 @@ static struct platform_driver msm_dp_display_driver = {
  		.of_match_table = msm_dp_dt_match,
  		.suppress_bind_attrs = true,
  		.pm = &msm_dp_pm_ops,
@@ -2448,7 +2503,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  	},
  };
  
-@@ -1343,7 +1964,9 @@ void __exit msm_dp_unregister(void)
+@@ -1343,7 +2007,9 @@ void __exit msm_dp_unregister(void)
  bool msm_dp_needs_periph_flush(const struct msm_dp *msm_dp_display,
  			       const struct drm_display_mode *mode)
  {
@@ -2459,7 +2514,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  }
  
  bool msm_dp_wide_bus_available(const struct msm_dp *msm_dp_display)
-@@ -1433,6 +2056,10 @@ void msm_dp_display_atomic_enable(struct msm_dp *msm_dp_display,
+@@ -1433,6 +2099,10 @@ void msm_dp_display_atomic_enable(struct msm_dp *msm_dp_display,
  
  	dp = container_of(msm_dp_display, struct msm_dp_display_private, msm_dp_display);
  
@@ -2470,7 +2525,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  	rc = msm_dp_display_prepare_link(dp);
  	if (rc) {
  		DRM_ERROR("DP display prepare failed, rc=%d\n", rc);
-@@ -1440,8 +2067,10 @@ void msm_dp_display_atomic_enable(struct msm_dp *msm_dp_display,
+@@ -1440,8 +2110,10 @@ void msm_dp_display_atomic_enable(struct msm_dp *msm_dp_display,
  	}
  
  	rc = msm_dp_display_enable(dp, dp->panel);
@@ -2482,7 +2537,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  
  	rc = msm_dp_display_post_enable(msm_dp_display);
  	if (rc) {
-@@ -1479,7 +2108,10 @@ static void msm_dp_display_unprepare(struct msm_dp_display_private *dp)
+@@ -1479,7 +2151,10 @@ static void msm_dp_display_unprepare(struct msm_dp_display_private *dp)
  {
  	struct msm_dp *msm_dp_display = &dp->msm_dp_display;
  
@@ -2494,7 +2549,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  
  	drm_dbg_dp(dp->drm_dev, "type=%d Done\n", msm_dp_display->connector_type);
  }
-@@ -1498,6 +2130,7 @@ void msm_dp_display_atomic_post_disable(struct msm_dp *dp)
+@@ -1498,6 +2173,7 @@ void msm_dp_display_atomic_post_disable(struct msm_dp *dp)
  	msm_dp_display_disable(msm_dp_display, msm_dp_display->panel);
  
  	msm_dp_display_unprepare(msm_dp_display);
@@ -2502,17 +2557,86 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..18b580ec32a001e4ef736cfd4fbb14c4
  }
  
  void msm_dp_bridge_hpd_enable(struct drm_bridge *bridge)
-@@ -1544,6 +2177,10 @@ void msm_dp_bridge_hpd_notify(struct drm_bridge *bridge,
- 	struct msm_dp_display_private *dp = container_of(msm_dp_display, struct msm_dp_display_private, msm_dp_display);
- 	u32 hpd_link_status = 0;
+@@ -1535,14 +2211,19 @@ void msm_dp_bridge_hpd_disable(struct drm_bridge *bridge)
+ 	pm_runtime_put_sync(&msm_dp_display->pdev->dev);
+ }
  
+-void msm_dp_bridge_hpd_notify(struct drm_bridge *bridge,
+-			      struct drm_connector *connector,
+-			      enum drm_connector_status status)
++static void msm_dp_hpd_work(struct work_struct *work)
+ {
+-	struct msm_dp_bridge *msm_dp_bridge = to_dp_bridge(bridge);
+-	struct msm_dp *msm_dp_display = msm_dp_bridge->msm_dp_display;
+-	struct msm_dp_display_private *dp = container_of(msm_dp_display, struct msm_dp_display_private, msm_dp_display);
++	struct msm_dp_display_private *dp =
++		container_of(work, struct msm_dp_display_private, hpd_work);
++	struct msm_dp *msm_dp_display = &dp->msm_dp_display;
++	enum drm_connector_status status = READ_ONCE(dp->work_status);
+ 	u32 hpd_link_status = 0;
++	bool was_plugged;
++	int sink_count;
++
++	/* The allocated router is the sole HPD owner while AUX is routed. */
++	if (msm_dp_aux_usb4_attached(dp->aux))
++		return;
+ 
+ 	if (pm_runtime_resume_and_get(&msm_dp_display->pdev->dev)) {
+ 		DRM_ERROR("failed to pm_runtime_resume\n");
+@@ -1550,6 +2231,8 @@ void msm_dp_bridge_hpd_notify(struct drm_bridge *bridge,
+ 	}
+ 
+ 	hpd_link_status = msm_dp_aux_is_link_connected(dp->aux);
++	was_plugged = READ_ONCE(dp->plugged);
++	sink_count = dp->link->sink_count;
+ 
+ 	drm_dbg_dp(dp->drm_dev, "type=%d link hpd_link_status=0x%x, status=%d\n",
+ 		   msm_dp_display->connector_type, hpd_link_status, status);
+@@ -1568,4 +2251,44 @@ void msm_dp_bridge_hpd_notify(struct drm_bridge *bridge,
+ 	}
+ 
+ 	pm_runtime_put_sync(&msm_dp_display->pdev->dev);
++
++	/*
++	 * The notifier's hotplug event may have been probed before this ran;
++	 * report the change again. Unchanged results stay quiet, as detect()
++	 * notifies too.
++	 */
++	if (READ_ONCE(dp->plugged) != was_plugged || dp->link->sink_count != sink_count)
++		drm_kms_helper_hotplug_event(dp->drm_dev);
++}
++
++void msm_dp_bridge_hpd_notify(struct drm_bridge *bridge,
++			      struct drm_connector *connector,
++			      enum drm_connector_status status)
++{
++	struct msm_dp_bridge *msm_dp_bridge = to_dp_bridge(bridge);
++	struct msm_dp *msm_dp_display = msm_dp_bridge->msm_dp_display;
++	struct msm_dp_display_private *dp = container_of(msm_dp_display, struct msm_dp_display_private, msm_dp_display);
++
 +	/* The allocated router is the sole HPD owner while AUX is routed. */
 +	if (msm_dp_aux_usb4_attached(dp->aux))
 +		return;
 +
- 	if (pm_runtime_resume_and_get(&msm_dp_display->pdev->dev)) {
- 		DRM_ERROR("failed to pm_runtime_resume\n");
- 		return;
++	/*
++	 * Record the status first, then stop transfers to a sink that went
++	 * away: an HPD handler already waiting on AUX fails fast instead of
++	 * timing out, and the notifier (e.g. the Type-C altmode worker) never
++	 * waits for AUX itself.
++	 */
++	if (READ_ONCE(dp->detect_task) == current) {
++		WRITE_ONCE(dp->detect_task, NULL);
++	} else {
++		WRITE_ONCE(dp->hpd_status, status);
++		if (status != connector_status_connected) {
++			/* Pairs with the barrier in msm_dp_hpd_plug_handle(). */
++			smp_mb();
++			msm_dp_aux_enable_xfers(dp->aux, false);
++		}
++	}
++	WRITE_ONCE(dp->work_status, status);
++	queue_work(system_long_wq, &dp->hpd_work);
+ }
 diff --git a/drivers/gpu/drm/msm/dp/dp_panel.c b/drivers/gpu/drm/msm/dp/dp_panel.c
 index 832328e607876035d4928f682b1ec7a6c0f42946..2c4cc4ba4d641c5af8734ab90d70f133b613156a 100644
 --- a/drivers/gpu/drm/msm/dp/dp_panel.c

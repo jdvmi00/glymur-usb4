@@ -155,7 +155,7 @@
   "results": [
     {
       "path": "patches/0001-phy-qualcomm-usb4.patch",
-      "sha256": "dc1db2f1d7cf96a09fa34baea007422f748aaf05ba411587be1402ab6147b8e4",
+      "sha256": "1d32b76518080eb0fca1492878f62760856e84c246a9f2b1b02d8c9db17d125d",
       "affected_paths": [
         "drivers/phy/qualcomm/phy-qcom-qmp-combo.c",
         "drivers/phy/qualcomm/phy-qcom-qmp-glymur-usb4-tables.h",
@@ -215,7 +215,7 @@
     },
     {
       "path": "patches/0005-thunderbolt-qcom-router.patch",
-      "sha256": "edef8f17c52cd220f93621b85a0856adbe9123088766c83915a55ccacd1639ce",
+      "sha256": "867f946c1e6d1a077f0d31eae49ef6f41202414b542fd7bd831b5f285c997136",
       "affected_paths": [
         "drivers/thunderbolt/Kconfig",
         "drivers/thunderbolt/Makefile",
@@ -275,7 +275,7 @@
     },
     {
       "path": "patches/0007-drm-msm-dp-tunneling.patch",
-      "sha256": "3f62bc8650ce386f90100a66428d227e847c1674260c3c3bdf0d7c64bd8bc679",
+      "sha256": "569786e234e7cdd4f6feb87b4126af706289e81485024e7ff4728c1418865d36",
       "affected_paths": [
         "drivers/gpu/drm/display/drm_dp_helper.c",
         "drivers/gpu/drm/msm/dp/dp_aux.c",
@@ -309,5 +309,36 @@
       ],
       "dependencies": "Patches 01-08 and the preserved Surface 1.17 prerequisites. Do not use this device tree for another board."
     }
-  ]
+  ],
+  "update_1_89": {
+    "source_commit": "916fea4551f656c35f3fdaec1ad1c5a4ecf885b3",
+    "inputs": [
+      {
+        "path": "kernel/usb4-candidate/usb4-candidate-1.86-vs-1.85.diff",
+        "sha256": "ae41072e9b83ed31f5077929913ae11a5d56d29b98c15883b95b215113f09cdd"
+      },
+      {
+        "path": "kernel/usb4-candidate/usb4-candidate-1.87-vs-1.86.diff",
+        "sha256": "2057689071b4ddee978cf15cccc2f05f27fca692d1872e64a9b1f38334356a59"
+      },
+      {
+        "path": "kernel/usb4-candidate/usb4-candidate-1.88-vs-1.87.diff",
+        "sha256": "2292039c157dcfcc0ae9115fd1e621708484a6faa49e81152e612620bbb6ee85"
+      },
+      {
+        "path": "kernel/usb4-candidate/usb4-candidate-1.89-vs-1.88.diff",
+        "sha256": "b342d62f95f76804c438ca355c56353515d9ead04d47e2deb12ecdb8214b5f09"
+      }
+    ],
+    "changed_paths": [
+      "drivers/gpu/drm/msm/dp/dp_display.c",
+      "drivers/phy/qualcomm/phy-qcom-qmp-combo.c",
+      "drivers/thunderbolt/qcom-usb4-dp.c",
+      "drivers/thunderbolt/qcom-usb4-dp.h",
+      "drivers/thunderbolt/qcom-usb4-host.c",
+      "drivers/thunderbolt/qcom-usb4-nhi.c",
+      "drivers/thunderbolt/qcom-usb4-nhi.h"
+    ],
+    "method": "Apply the four candidate diffs to the verified 1.85 source. For each changed file, replace its complete section in patches 01, 05 and 07 with a diff from the review baseline to the 1.89 file (git diff --full-index --diff-algorithm=histogram, a/ b/ prefixes, no diff drivers). The same command reproduces every 1.85 section of those files byte for byte. Other files and patches are unchanged."
+  }
 }

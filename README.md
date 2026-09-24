@@ -7,14 +7,14 @@ included here.
 
 Start with **[the ordered patch series](patches/README.md)**. Nine patches
 separate the shared host, Qualcomm hardware, display and Surface changes while
-producing the same 1.85 source. They apply on top of the preserved Surface 1.17
+producing the same 1.89 source. They apply on top of the preserved Surface 1.17
 kernel prerequisites, not vanilla Linux. The complete series is verified;
 individual intermediate builds and upstream submission cleanup remain pending.
 
 | Path | Purpose |
 | --- | --- |
 | `patches/` | Component patches, dependencies and application order |
-| `tests/` | Five extracted-C test suites |
+| `tests/` | Eight extracted-C test suites |
 | `reproduce/` | Baseline prerequisites, final configuration and source hashes |
 | `provenance/` | Original author headers and patch derivation record |
 
@@ -23,7 +23,9 @@ individual intermediate builds and upstream submission cleanup remain pending.
 · [License](LICENSE.md)
 
 Automatic 6K60, internal 120 Hz, physical reconnect, Dell Ethernet traffic and
-actual battery recharge passed bounded tests. HDMI-selected Dell hub resets
+actual battery recharge passed bounded tests. The same port also works on
+first plug with USB-C to HDMI cables and hubs and USB3 drives; the router runs
+only while a USB4 or Thunderbolt partner is attached. HDMI-selected Dell hub resets
 remain unresolved and also reproduced on a Mac. Other boards, PCIe tunneling,
 suspend/resume and external 6K120 are not validated as working.
 

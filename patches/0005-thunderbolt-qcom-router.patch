@@ -1,6 +1,6 @@
 Subject: [REVIEW 05/09] Qualcomm router and DisplayPort provider
 
-Add the Glymur router frontend, firmware/MCU control, NHI transport, startup, events, Type-C handling and DP provider. Review probe failures, release/restart, asynchronous work and the public display contract.
+Add the Glymur router frontend, firmware/MCU control, NHI transport, startup, events, Type-C handling and DP provider. Review probe failures, release/restart, asynchronous work and the public display contract. The router runs only while a USB4 or Thunderbolt partner is attached; other USB-C partners use the port natively.
 
 Dependencies: Patches 01-04; patches 06-07 complete the coupled display integration. Apply the complete series before building.
 
@@ -324,10 +324,10 @@ index 0000000000000000000000000000000000000000..44c33bed8354dfb314e331fb7f7e0377
 +#endif
 diff --git a/drivers/thunderbolt/qcom-usb4-dp.c b/drivers/thunderbolt/qcom-usb4-dp.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..1e2070667d46921bc9de22c41fee7d700900fab7
+index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4b4be71fc
 --- /dev/null
 +++ b/drivers/thunderbolt/qcom-usb4-dp.c
-@@ -0,0 +1,876 @@
+@@ -0,0 +1,894 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Surface Laptop 8 router 0 / DP IN 0 experimental display owner.
@@ -1064,6 +1064,24 @@ index 0000000000000000000000000000000000000000..1e2070667d46921bc9de22c41fee7d70
 +	qcom_usb4_dp_disable(dp, true);
 +}
 +
++/*
++ * The router was stopped with qcom_usb4_dp_stop() and cold-started again:
++ * its adapters start from reset, so earlier FIFO and release faults no
++ * longer describe the hardware. Accept link events again.
++ */
++void qcom_usb4_dp_restart(struct qcom_usb4_dp *dp)
++{
++	if (!dp)
++		return;
++	mutex_lock(&dp->lifecycle_lock);
++	WARN_ON(dp->enabled || dp->child);
++	WRITE_ONCE(dp->fifo_fault, false);
++	WRITE_ONCE(dp->release_failed, false);
++	WRITE_ONCE(dp->connected, false);
++	WRITE_ONCE(dp->stopping, false);
++	mutex_unlock(&dp->lifecycle_lock);
++}
++
 +struct qcom_usb4_dp *qcom_usb4_dp_create(struct device *dev, void __iomem *router)
 +{
 +	struct qcom_usb4_dp *dp;
@@ -1206,10 +1224,10 @@ index 0000000000000000000000000000000000000000..1e2070667d46921bc9de22c41fee7d70
 +}
 diff --git a/drivers/thunderbolt/qcom-usb4-dp.h b/drivers/thunderbolt/qcom-usb4-dp.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..fe17e5b9ca194e26a60390d5df80617275b3f361
+index 0000000000000000000000000000000000000000..59f4d84ceb97bf3aab7858e206236f8001ed6f20
 --- /dev/null
 +++ b/drivers/thunderbolt/qcom-usb4-dp.h
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,22 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +#ifndef QCOM_USB4_DP_H
 +#define QCOM_USB4_DP_H
@@ -1222,6 +1240,7 @@ index 0000000000000000000000000000000000000000..fe17e5b9ca194e26a60390d5df806172
 +extern struct platform_driver qcom_usb4_dp_driver;
 +void qcom_usb4_dp_set_connected(struct qcom_usb4_dp *dp, bool connected);
 +void qcom_usb4_dp_stop(struct qcom_usb4_dp *dp);
++void qcom_usb4_dp_restart(struct qcom_usb4_dp *dp);
 +
 +struct qcom_usb4_dp *qcom_usb4_dp_create(struct device *dev, void __iomem *router);
 +int qcom_usb4_dp_enable(struct qcom_usb4_dp *dp);
@@ -1543,10 +1562,10 @@ index 0000000000000000000000000000000000000000..d0775f9eb4513de9db55c1bdfed57c35
 +#endif
 diff --git a/drivers/thunderbolt/qcom-usb4-host.c b/drivers/thunderbolt/qcom-usb4-host.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..5facbe190cc0f5e4c391c209c198d91e499654ed
+index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fce4556fac
 --- /dev/null
 +++ b/drivers/thunderbolt/qcom-usb4-host.c
-@@ -0,0 +1,1247 @@
+@@ -0,0 +1,1366 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Qualcomm Glymur USB4 host router platform frontend.
@@ -1587,6 +1606,7 @@ index 0000000000000000000000000000000000000000..5facbe190cc0f5e4c391c209c198d91e
 +#include <linux/usb/typec.h>
 +#include <linux/usb/typec_mux.h>
 +#include <linux/usb/typec_tbt.h>
++#include <linux/workqueue.h>
 +
 +#include "nhi.h"
 +#include "tb.h"
@@ -1611,6 +1631,12 @@ index 0000000000000000000000000000000000000000..5facbe190cc0f5e4c391c209c198d91e
 +#define QCOM_USB4_COMMAND_TIMEOUT_US	10000
 +#define QCOM_USB4_SURFACE_PRESET	0x4421
 +#define QCOM_USB4_SYS_READY_TIMEOUT_US	100000
++/*
++ * After a USB4 partner leaves, wait this long (and until DRM has released the
++ * DisplayPort tunnel) before stopping the router, so an immediate replug just
++ * reconnects.
++ */
++#define QCOM_USB4_IDLE_STOP_MS		500
 +#define QCOM_USB4_MAX_ROUTERS		3
 +
 +/* Verified board facts: PS8830 board retimer on every Surface Laptop 8 port. */
@@ -1686,6 +1712,18 @@ index 0000000000000000000000000000000000000000..5facbe190cc0f5e4c391c209c198d91e
 +	bool connected;
 +
 +	bool started;
++	/*
++	 * The router and native partners (USB, DisplayPort alternate mode)
++	 * share the port's PHY lanes, and a partner trains its link the moment
++	 * it is plugged in. The router therefore runs only for a USB4 or
++	 * Thunderbolt partner: it is cold-started on entry and stopped once
++	 * the partner and its DisplayPort tunnel are gone. @released means
++	 * ready but stopped.
++	 */
++	bool released;
++	bool removing;
++	struct mutex lifecycle_lock;
++	struct delayed_work lifecycle_work;
 +	bool nhi_probed;
 +	bool phy_initialized;
 +	bool mcu_irq_enabled;
@@ -2019,6 +2057,13 @@ index 0000000000000000000000000000000000000000..5facbe190cc0f5e4c391c209c198d91e
 +	host->pending = request;
 +	host->pending_command = command;
 +	qcom_usb4_host_apply_link(host);
++	if (!host->removing) {
++		if (request == QCOM_USB4_LINK_CONNECT && host->released)
++			mod_delayed_work(system_long_wq, &host->lifecycle_work, 0);
++		else if (request == QCOM_USB4_LINK_DISCONNECT && host->started)
++			mod_delayed_work(system_long_wq, &host->lifecycle_work,
++					 msecs_to_jiffies(QCOM_USB4_IDLE_STOP_MS));
++	}
 +	mutex_unlock(&host->lock);
 +	return 0;
 +}
@@ -2103,6 +2148,9 @@ index 0000000000000000000000000000000000000000..5facbe190cc0f5e4c391c209c198d91e
 +		if (ret)
 +			dev_warn(host->dev, "router reset assert at stop failed: %d\n", ret);
 +	}
++	/* Nothing is left running; a repeated stop has nothing to undo. */
++	if (host->start_state.phase == QCOM_USB4_START_COMPLETE)
++		host->start_state.phase = QCOM_USB4_START_NEW;
 +	host->started = false;
 +	host->connected = false;
 +	mutex_unlock(&host->lock);
@@ -2322,6 +2370,97 @@ index 0000000000000000000000000000000000000000..5facbe190cc0f5e4c391c209c198d91e
 +	pm_runtime_forbid(host->dev);
 +	host->nhi_probed = true;
 +	return 0;
++}
++
++/*
++ * Port ownership. Stopping the router hands the PHY back to the native Type-C
++ * mux (phy_exit(usb4) restores the mode last requested there) and releases
++ * the lanes' TCSR routing. It is the teardown path without the final clock,
++ * power and firmware release. Starting it again repeats the probe-time cold
++ * start and NHI probe.
++ */
++static void qcom_usb4_host_release(struct qcom_usb4_host *host)
++{
++	dev_info(host->dev, "no USB4 partner: stopping USB4 host router %u\n", host->port);
++	if (host->nhi_probed) {
++		/* Domain removal ends in our NHI shutdown, which stops the hardware. */
++		nhi_remove(&host->qnhi.nhi);
++		host->nhi_probed = false;
++		pm_runtime_put_noidle(host->dev);
++	} else {
++		qcom_usb4_host_stop_hardware(host);
++	}
++	host->released = true;
++}
++
++static int qcom_usb4_host_acquire(struct qcom_usb4_host *host)
++{
++	int ret;
++
++	dev_info(host->dev, "USB4 partner: starting USB4 host router %u\n", host->port);
++	ret = qcom_usb4_nhi_reset(&host->qnhi);
++	if (ret)
++		return ret;
++	ret = qcom_usb4_host_start(host);
++	if (ret)
++		goto err_stop;
++
++	host->event_consumer = 0;
++	host->mcu_irq_enabled = true;
++	qcom_usb4_host_update_router(host, QCOM_USB4_MCU_IRQ_ENABLE, BIT(0), BIT(0));
++	qcom_usb4_dp_restart(host->dp);
++
++	ret = qcom_usb4_host_probe_nhi(host);
++	if (ret) {
++		dev_err(host->dev, "NHI probe failed: %d\n", ret);
++		/* nhi_probe() already ran our shutdown on its failure path. */
++		goto err_stop;
++	}
++
++	mutex_lock(&host->lock);
++	host->released = false;
++	host->started = true;
++	qcom_usb4_host_apply_link(host);
++	mutex_unlock(&host->lock);
++	dev_info(host->dev, "USB4 host router %u up\n", host->port);
++	return 0;
++
++err_stop:
++	qcom_usb4_host_stop_hardware(host);
++	dev_err(host->dev, "USB4 host router %u not started (%d)\n", host->port, ret);
++	return ret;
++}
++
++static void qcom_usb4_host_lifecycle_work(struct work_struct *work)
++{
++	struct qcom_usb4_host *host = container_of(to_delayed_work(work),
++						   struct qcom_usb4_host, lifecycle_work);
++	bool release, acquire;
++
++	mutex_lock(&host->lifecycle_lock);
++	for (;;) {
++		mutex_lock(&host->lock);
++		release = !host->removing && host->started && !host->connected;
++		/* DRM stops the tunnel's producer first; the router must outlive it. */
++		if (release && qcom_usb4_dp_active(host->dp)) {
++			dev_dbg(host->dev, "DisplayPort tunnel still active; delaying stop\n");
++			mod_delayed_work(system_long_wq, &host->lifecycle_work,
++					 msecs_to_jiffies(QCOM_USB4_IDLE_STOP_MS));
++			release = false;
++		}
++		acquire = !host->removing && host->released &&
++			  host->pending == QCOM_USB4_LINK_CONNECT;
++		/* Stop sending commands before the hardware goes away. */
++		if (release)
++			host->started = false;
++		mutex_unlock(&host->lock);
++
++		if (release)
++			qcom_usb4_host_release(host);
++		else if (!acquire || qcom_usb4_host_acquire(host))
++			break;
++	}
++	mutex_unlock(&host->lifecycle_lock);
 +}
 +
 +static ssize_t startup_state_show(struct device *dev, struct device_attribute *attr,
@@ -2618,6 +2757,8 @@ index 0000000000000000000000000000000000000000..5facbe190cc0f5e4c391c209c198d91e
 +		return -ENOMEM;
 +	host->dev = dev;
 +	mutex_init(&host->lock);
++	mutex_init(&host->lifecycle_lock);
++	INIT_DELAYED_WORK(&host->lifecycle_work, qcom_usb4_host_lifecycle_work);
 +	init_completion(&host->stop_event);
 +	host->orientation = TYPEC_ORIENTATION_NONE;
 +
@@ -2694,28 +2835,14 @@ index 0000000000000000000000000000000000000000..5facbe190cc0f5e4c391c209c198d91e
 +		goto out_stopped;
 +	}
 +
-+	ret = qcom_usb4_host_start(host);
-+	if (ret)
-+		goto out_stopped;
-+
-+	/* Enable MCU event delivery now that the shared memory is known. */
-+	host->event_consumer = 0;
-+	host->mcu_irq_enabled = true;
-+	qcom_usb4_host_update_router(host, QCOM_USB4_MCU_IRQ_ENABLE, BIT(0), BIT(0));
-+
-+	ret = qcom_usb4_host_probe_nhi(host);
-+	if (ret) {
-+		dev_err(dev, "NHI probe failed: %d\n", ret);
-+		/* nhi_probe() already ran our shutdown on its failure path. */
-+		goto out_stopped;
-+	}
-+
++	/* The router starts on the first USB4 or Thunderbolt entry. */
 +	mutex_lock(&host->lock);
-+	host->started = true;
-+	qcom_usb4_host_apply_link(host);
++	host->released = true;
++	if (host->pending == QCOM_USB4_LINK_CONNECT)
++		mod_delayed_work(system_long_wq, &host->lifecycle_work, 0);
 +	mutex_unlock(&host->lock);
 +
-+	dev_info(dev, "USB4 host router %u up\n", host->port);
++	dev_info(dev, "USB4 host router %u ready\n", host->port);
 +	return 0;
 +
 +out_stopped:
@@ -2735,6 +2862,11 @@ index 0000000000000000000000000000000000000000..5facbe190cc0f5e4c391c209c198d91e
 +{
 +	unsigned int i;
 +
++	mutex_lock(&host->lock);
++	host->removing = true;
++	mutex_unlock(&host->lock);
++	cancel_delayed_work_sync(&host->lifecycle_work);
++	mutex_lock(&host->lifecycle_lock);
 +	if (host->nhi_probed) {
 +		/* Domain removal ends in our NHI shutdown, which stops the hardware. */
 +		nhi_remove(&host->qnhi.nhi);
@@ -2752,6 +2884,7 @@ index 0000000000000000000000000000000000000000..5facbe190cc0f5e4c391c209c198d91e
 +		release_firmware(host->fw);
 +		host->fw = NULL;
 +	}
++	mutex_unlock(&host->lifecycle_lock);
 +	mutex_lock(&qcom_usb4_hosts_lock);
 +	for (i = 0; i < QCOM_USB4_MAX_ROUTERS; i++)
 +		if (qcom_usb4_hosts[i] == host)
@@ -2791,6 +2924,11 @@ index 0000000000000000000000000000000000000000..5facbe190cc0f5e4c391c209c198d91e
 +		.name = "qcom-usb4-host",
 +		.of_match_table = qcom_usb4_host_of_match,
 +		.dev_groups = qcom_usb4_host_groups,
++		/*
++		 * The Type-C consumers keep this device's switch and mux for the
++		 * life of the port and have no way to drop them on unbind.
++		 */
++		.suppress_bind_attrs = true,
 +		/* Type-C requests may arrive before startup; do not probe asynchronously. */
 +	},
 +};
@@ -3334,12 +3472,13 @@ index 0000000000000000000000000000000000000000..df49836bfcf3d13f0762ba5d6a38299b
 +#endif
 diff --git a/drivers/thunderbolt/qcom-usb4-nhi.c b/drivers/thunderbolt/qcom-usb4-nhi.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..d73ac6a0a756b2a4612f29c8daefea95abe3536e
+index 0000000000000000000000000000000000000000..421ef30a275c3c7d828dfcab6c94d16f1d5b66f9
 --- /dev/null
 +++ b/drivers/thunderbolt/qcom-usb4-nhi.c
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,269 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +#include <linux/bitops.h>
++#include <linux/device.h>
 +#include <linux/errno.h>
 +#include <linux/interrupt.h>
 +#include <linux/lockdep.h>
@@ -3590,12 +3729,28 @@ index 0000000000000000000000000000000000000000..d73ac6a0a756b2a4612f29c8daefea95
 +unlock:
 +	mutex_unlock(&qnhi->ownership_lock);
 +}
++
++int qcom_usb4_nhi_reset(struct qcom_usb4_nhi *qnhi)
++{
++	struct tb_nhi *nhi = &qnhi->nhi;
++
++	if (qnhi->prepared && !qnhi->released)
++		return -EBUSY;
++	if (nhi->dev && nhi->tx_rings)
++		devm_kfree(nhi->dev, nhi->tx_rings);
++	if (nhi->dev && nhi->rx_rings)
++		devm_kfree(nhi->dev, nhi->rx_rings);
++	if (qnhi->prepared)
++		mutex_destroy(&qnhi->ownership_lock);
++	memset(qnhi, 0, sizeof(*qnhi));
++	return 0;
++}
 diff --git a/drivers/thunderbolt/qcom-usb4-nhi.h b/drivers/thunderbolt/qcom-usb4-nhi.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..09f97ec7b082277f4612e97be3fb172592abf084
+index 0000000000000000000000000000000000000000..15318def63d390fba0eaae0b20fd6dbeabac0011
 --- /dev/null
 +++ b/drivers/thunderbolt/qcom-usb4-nhi.h
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,78 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +#ifndef QCOM_USB4_NHI_H
 +#define QCOM_USB4_NHI_H
@@ -3665,6 +3820,13 @@ index 0000000000000000000000000000000000000000..09f97ec7b082277f4612e97be3fb1725
 + * must also exclude every future callback and complete all existing callers.
 + */
 +void qcom_usb4_nhi_shutdown(struct tb_nhi *nhi);
++
++/*
++ * Return a shut-down interface to its unprepared state so the frontend can
++ * prepare and probe it again after restarting the router. Rejected before
++ * shutdown has released ring ownership. Frees the common layer's ring tables.
++ */
++int qcom_usb4_nhi_reset(struct qcom_usb4_nhi *qnhi);
 +
 +#endif
 diff --git a/drivers/thunderbolt/qcom-usb4-startup.c b/drivers/thunderbolt/qcom-usb4-startup.c

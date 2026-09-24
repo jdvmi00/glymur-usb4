@@ -1,6 +1,6 @@
 Subject: [REVIEW 01/09] Qualcomm USB4 PHY modes, tables and lifecycle
 
-Add the Thunderbolt PHY interface and the QMP USB4 mode, Glymur register tables, and PHY power/reset sequencing. Review mode transitions and ownership of shared USB/DP lanes.
+Add the Thunderbolt PHY interface and the QMP USB4 mode, Glymur register tables, and PHY power/reset sequencing. Review mode transitions and ownership of shared USB/DP lanes. A Type-C mode requested while USB4 owns the PHY, such as DisplayPort alternate mode, is applied when USB4 releases it.
 
 Dependencies: Base prerequisites. Used by patches 04 and 05.
 
@@ -12,7 +12,7 @@ in the referenced provenance files. No new Signed-off-by trailers are added.
 
 ---
 diff --git a/drivers/phy/qualcomm/phy-qcom-qmp-combo.c b/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
-index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c307e4e766a 100644
+index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..26aa84406c4aecfa47b83fb322facfd155dbe2b4 100644
 --- a/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
 +++ b/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
 @@ -22,6 +22,7 @@
@@ -302,20 +302,23 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	int num_clks;
  	struct reset_control_bulk_data *resets;
  	struct regulator_bulk_data *vregs;
-@@ -2655,6 +2843,12 @@ struct qmp_combo {
+@@ -2655,6 +2843,15 @@ struct qmp_combo {
  	unsigned int dp_init_count;
  	bool dp_powered_on;
  
 +	struct phy *usb4_phy;
 +	enum tbt_phy_submode usb4_phy_submode;
 +	unsigned int usb4_init_count;
++	/* Last native Type-C mode requested while USB4 owned the PHY */
++	enum qmpphy_mode typec_mode;
++	bool typec_mode_pending;
 +	bool com_powered_on;
 +	u32 usb4_rx_eq;
 +
  	struct clk_fixed_rate pipe_clk_fixed;
  	struct clk_hw dp_link_hw;
  	struct clk_hw dp_pixel_hw;
-@@ -2678,6 +2872,7 @@ static int qmp_v4_configure_dp_phy(struct qmp_combo *qmp);
+@@ -2678,6 +2875,7 @@ static int qmp_v4_configure_dp_phy(struct qmp_combo *qmp);
  static void qmp_v8_dp_aux_init(struct qmp_combo *qmp);
  static int qmp_v8_configure_dp_clocks(struct qmp_combo *qmp);
  static int qmp_v8_configure_dp_phy(struct qmp_combo *qmp);
@@ -323,7 +326,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  
  static inline void qphy_setbits(void __iomem *base, u32 offset, u32 val)
  {
-@@ -2747,6 +2942,23 @@ static const struct qmp_combo_offsets qmp_combo_offsets_v5 = {
+@@ -2747,6 +2945,23 @@ static const struct qmp_combo_offsets qmp_combo_offsets_v5 = {
  	.dp_dp_phy	= 0x2200,
  };
  
@@ -347,7 +350,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  static const struct qmp_combo_offsets qmp_combo_offsets_v8 = {
  	.com		= 0x0000,
  	.txa		= 0x1400,
-@@ -2793,6 +3005,8 @@ static const struct qmp_combo_offsets qmp_combo_usb43dp_offsets_v8 = {
+@@ -2793,6 +3008,8 @@ static const struct qmp_combo_offsets qmp_combo_usb43dp_offsets_v8 = {
  	.dp_dp_phy	= 0x2400,
  	.txa		= 0x4000,
  	.txb		= 0x5000,
@@ -356,7 +359,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  };
  
  static const struct qmp_phy_cfg sar2130p_usb3dpphy_cfg = {
-@@ -3028,11 +3242,11 @@ static const struct qmp_phy_cfg sc8280xp_usb43dpphy_cfg = {
+@@ -3028,11 +3245,11 @@ static const struct qmp_phy_cfg sc8280xp_usb43dpphy_cfg = {
  	.regs			= qmp_v5_5nm_usb3phy_regs_layout,
  };
  
@@ -372,7 +375,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	.tx_tbl			= x1e80100_usb43dp_tx_tbl,
  	.tx_tbl_num		= ARRAY_SIZE(x1e80100_usb43dp_tx_tbl),
  	.rx_tbl			= x1e80100_usb43dp_rx_tbl,
-@@ -3068,6 +3282,19 @@ static const struct qmp_phy_cfg x1e80100_usb3dpphy_cfg = {
+@@ -3068,6 +3285,19 @@ static const struct qmp_phy_cfg x1e80100_usb3dpphy_cfg = {
  	.dp_aux_cfg2		= QSERDES_DP_PHY_AUX_CFG2_V456,
  	.dp_phy_cfg1		= QSERDES_DP_PHY_CFG1_V456,
  
@@ -392,7 +395,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	.reset_list		= msm8996_usb3phy_reset_l,
  	.num_resets		= ARRAY_SIZE(msm8996_usb3phy_reset_l),
  	.vreg_list		= qmp_phy_vreg_l,
-@@ -3465,6 +3692,7 @@ static const struct qmp_phy_cfg glymur_usb3dpphy_cfg = {
+@@ -3465,6 +3695,7 @@ static const struct qmp_phy_cfg glymur_usb3dpphy_cfg = {
  	.dp_aux_init		= qmp_v8_dp_aux_init,
  	.configure_dp_tx	= qmp_v4_configure_dp_tx,
  	.configure_dp_clocks	= qmp_v8_configure_dp_clocks,
@@ -400,7 +403,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	.configure_dp_phy	= qmp_v8_configure_dp_phy,
  
  	.dp_aux_cfg2		= QSERDES_DP_PHY_AUX_CFG2_V8,
-@@ -4207,7 +4435,9 @@ static int qmp_combo_dp_configure(struct phy *phy, union phy_configure_opts *opt
+@@ -4207,7 +4438,9 @@ static int qmp_combo_dp_configure(struct phy *phy, union phy_configure_opts *opt
  
  	memcpy(&qmp->dp_opts, dp_opts, sizeof(*dp_opts));
  	if (qmp->dp_opts.set_voltages) {
@@ -411,7 +414,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  		qmp->dp_opts.set_voltages = 0;
  	}
  
-@@ -4224,7 +4454,7 @@ static int qmp_combo_dp_calibrate(struct phy *phy)
+@@ -4224,7 +4457,7 @@ static int qmp_combo_dp_calibrate(struct phy *phy)
  
  	mutex_lock(&qmp->phy_mutex);
  
@@ -420,7 +423,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  		ret = cfg->calibrate_dp_phy(qmp);
  
  	mutex_unlock(&qmp->phy_mutex);
-@@ -4235,12 +4465,15 @@ static int qmp_combo_dp_calibrate(struct phy *phy)
+@@ -4235,12 +4468,15 @@ static int qmp_combo_dp_calibrate(struct phy *phy)
  static int qmp_combo_com_init(struct qmp_combo *qmp, bool force)
  {
  	const struct qmp_phy_cfg *cfg = qmp->cfg;
@@ -438,7 +441,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  		return 0;
  
  	if (qmp->aon_toggle)
-@@ -4248,6 +4481,18 @@ static int qmp_combo_com_init(struct qmp_combo *qmp, bool force)
+@@ -4248,6 +4484,18 @@ static int qmp_combo_com_init(struct qmp_combo *qmp, bool force)
  	else
  		aon_toggle = qmp->pcs_aon;
  
@@ -457,7 +460,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	ret = regulator_bulk_enable(cfg->num_vregs, qmp->vregs);
  	if (ret) {
  		dev_err(qmp->dev, "failed to enable regulators, err=%d\n", ret);
-@@ -4281,8 +4526,9 @@ static int qmp_combo_com_init(struct qmp_combo *qmp, bool force)
+@@ -4281,8 +4529,9 @@ static int qmp_combo_com_init(struct qmp_combo *qmp, bool force)
  
  	/* override hardware control for reset of qmp phy */
  	qphy_setbits(com, QPHY_V3_DP_COM_RESET_OVRD_CTRL,
@@ -469,7 +472,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  
  	/* override hardware control for reset of qmp phy */
  	if (aon_toggle && cfg->regs[QPHY_AON_TOGGLE_ENABLE]) {
-@@ -4298,6 +4544,10 @@ static int qmp_combo_com_init(struct qmp_combo *qmp, bool force)
+@@ -4298,6 +4547,10 @@ static int qmp_combo_com_init(struct qmp_combo *qmp, bool force)
  	if (cfg->invert_cc_polarity)
  		val |= INVERT_CC_POLARITY;
  
@@ -480,7 +483,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	writel(val, com + QPHY_V3_DP_COM_TYPEC_CTRL);
  
  	switch (qmp->qmpphy_mode) {
-@@ -4325,14 +4575,27 @@ static int qmp_combo_com_init(struct qmp_combo *qmp, bool force)
+@@ -4325,14 +4578,27 @@ static int qmp_combo_com_init(struct qmp_combo *qmp, bool force)
  		qphy_clrbits(com, QPHY_V3_DP_COM_RESET_OVRD_CTRL,
  				SW_USB3PHY_RESET_MUX | SW_USB3PHY_RESET);
  		break;
@@ -509,7 +512,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	return 0;
  
  err_disable_clocks:
-@@ -4342,7 +4605,8 @@ err_assert_reset:
+@@ -4342,7 +4608,8 @@ err_assert_reset:
  err_disable_regulators:
  	regulator_bulk_disable(cfg->num_vregs, qmp->vregs);
  err_decrement_count:
@@ -519,7 +522,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  
  	return ret;
  }
-@@ -4354,6 +4618,10 @@ static int qmp_combo_com_exit(struct qmp_combo *qmp, bool force)
+@@ -4354,6 +4621,10 @@ static int qmp_combo_com_exit(struct qmp_combo *qmp, bool force)
  	if (!force && --qmp->init_count)
  		return 0;
  
@@ -530,7 +533,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	reset_control_bulk_assert(cfg->num_resets, qmp->resets);
  
  	clk_disable_unprepare(qmp->pipe_clk);
-@@ -4411,6 +4679,28 @@ static int qmp_combo_dp_power_on(struct phy *phy)
+@@ -4411,6 +4682,28 @@ static int qmp_combo_dp_power_on(struct phy *phy)
  
  	mutex_lock(&qmp->phy_mutex);
  
@@ -559,7 +562,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	qmp_combo_dp_serdes_init(qmp);
  
  	qmp_combo_dp_lane_blocks(qmp, &use_tx, &use_tx2);
-@@ -4446,7 +4736,12 @@ static int qmp_combo_dp_power_off(struct phy *phy)
+@@ -4446,7 +4739,12 @@ static int qmp_combo_dp_power_off(struct phy *phy)
  	mutex_lock(&qmp->phy_mutex);
  
  	/* Assert DP PHY power down */
@@ -573,7 +576,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  
  	qmp->dp_powered_on = false;
  
-@@ -4455,11 +4750,135 @@ static int qmp_combo_dp_power_off(struct phy *phy)
+@@ -4455,11 +4753,135 @@ static int qmp_combo_dp_power_off(struct phy *phy)
  	return 0;
  }
  
@@ -709,7 +712,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	void __iomem *tx = qmp->tx;
  	void __iomem *rx = qmp->rx;
  	void __iomem *tx2 = qmp->tx2;
-@@ -4467,23 +4886,57 @@ static int qmp_combo_usb_power_on(struct phy *phy)
+@@ -4467,23 +4889,57 @@ static int qmp_combo_usb_power_on(struct phy *phy)
  	void __iomem *pcs = qmp->pcs;
  	void __iomem *pcs_usb = qmp->pcs_usb;
  	void __iomem *status;
@@ -775,7 +778,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  		qmp_configure(qmp->dev, pcs_usb, cfg->pcs_usb_tbl,
  			      cfg->pcs_usb_tbl_num);
  
-@@ -4501,31 +4954,34 @@ static int qmp_combo_usb_power_on(struct phy *phy)
+@@ -4501,31 +4957,34 @@ static int qmp_combo_usb_power_on(struct phy *phy)
  			PHY_INIT_COMPLETE_TIMEOUT);
  	if (ret) {
  		dev_err(qmp->dev, "phy initialization timed-out\n");
@@ -818,7 +821,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  			SW_PWRDN);
  
  	return 0;
-@@ -4536,21 +4992,27 @@ static int qmp_combo_usb_init(struct phy *phy)
+@@ -4536,21 +4995,27 @@ static int qmp_combo_usb_init(struct phy *phy)
  	struct qmp_combo *qmp = phy_get_drvdata(phy);
  	int ret;
  
@@ -851,7 +854,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	return ret;
  }
  
-@@ -4559,20 +5021,26 @@ static int qmp_combo_usb_exit(struct phy *phy)
+@@ -4559,20 +5024,26 @@ static int qmp_combo_usb_exit(struct phy *phy)
  	struct qmp_combo *qmp = phy_get_drvdata(phy);
  	int ret;
  
@@ -884,7 +887,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  }
  
  static int qmp_combo_usb_set_mode(struct phy *phy, enum phy_mode mode, int submode)
-@@ -4584,6 +5052,148 @@ static int qmp_combo_usb_set_mode(struct phy *phy, enum phy_mode mode, int submo
+@@ -4584,6 +5055,169 @@ static int qmp_combo_usb_set_mode(struct phy *phy, enum phy_mode mode, int submo
  	return 0;
  }
  
@@ -1005,12 +1008,33 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
 +		return ret;
 +
 +	/*
-+	 * Mark the USB4 PHY uninitialized and wait for a mux_set event to determine the correct
-+	 * setting. This will always be possible because USB4 requires Type-C.
++	 * Mark the USB4 PHY uninitialized. If the partner asked for a native mode while
++	 * USB4 owned the PHY, e.g. DisplayPort alternate mode, switch to it now: that
++	 * request will not be repeated. Otherwise wait for a mux_set event to determine
++	 * the correct setting. This will always be possible because USB4 requires Type-C.
 +	 */
 +	qmp->usb4_init_count--;
 +
 +	clk_disable_unprepare(qmp->p2rr2p_pipe_clk);
++
++	if (!qmp->typec_mode_pending)
++		return 0;
++	qmp->typec_mode_pending = false;
++
++	if (!qmp->init_count) {
++		qmp->qmpphy_mode = qmp->typec_mode;
++		return 0;
++	}
++
++	if (qmp->dp_powered_on) {
++		dev_dbg(qmp->dev, "usb4_exit: DP PHY is still in use, delaying switch\n");
++		return 0;
++	}
++
++	ret = qmp_combo_reconfigure_phy(qmp, qmp->typec_mode);
++	if (ret)
++		dev_err(qmp->dev, "failed to restore Type-C mode %d: %d\n",
++			qmp->typec_mode, ret);
 +
 +	return 0;
 +}
@@ -1033,7 +1057,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  static const struct phy_ops qmp_combo_usb_phy_ops = {
  	.init		= qmp_combo_usb_init,
  	.exit		= qmp_combo_usb_exit,
-@@ -4591,6 +5201,13 @@ static const struct phy_ops qmp_combo_usb_phy_ops = {
+@@ -4591,6 +5225,13 @@ static const struct phy_ops qmp_combo_usb_phy_ops = {
  	.owner		= THIS_MODULE,
  };
  
@@ -1047,7 +1071,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  static const struct phy_ops qmp_combo_dp_phy_ops = {
  	.init		= qmp_combo_dp_init,
  	.configure	= qmp_combo_dp_configure,
-@@ -4630,9 +5247,12 @@ static void qmp_combo_enable_autonomous_mode(struct qmp_combo *qmp)
+@@ -4630,9 +5271,12 @@ static void qmp_combo_enable_autonomous_mode(struct qmp_combo *qmp)
  	 * Enable i/o clamp_n for autonomous mode
  	 * V6 and later versions use pcs aon clamp register
  	 */
@@ -1063,7 +1087,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  		qphy_clrbits(pcs_misc, cfg->regs[QPHY_PCS_CLAMP_ENABLE], CLAMP_EN);
  }
  
-@@ -4644,9 +5264,12 @@ static void qmp_combo_disable_autonomous_mode(struct qmp_combo *qmp)
+@@ -4644,9 +5288,12 @@ static void qmp_combo_disable_autonomous_mode(struct qmp_combo *qmp)
  	void __iomem *pcs_aon = qmp->pcs_aon;
  
  	/* Disable i/o clamp_n on resume for normal mode */
@@ -1079,7 +1103,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  		qphy_setbits(pcs_misc, cfg->regs[QPHY_PCS_CLAMP_ENABLE], CLAMP_EN);
  
  	qphy_clrbits(pcs_usb, cfg->regs[QPHY_PCS_AUTONOMOUS_MODE_CTRL],
-@@ -5018,26 +5641,21 @@ static int qmp_combo_typec_switch_set(struct typec_switch_dev *sw,
+@@ -5018,26 +5665,21 @@ static int qmp_combo_typec_switch_set(struct typec_switch_dev *sw,
  				      enum typec_orientation orientation)
  {
  	struct qmp_combo *qmp = typec_switch_get_drvdata(sw);
@@ -1115,7 +1139,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  
  	return 0;
  }
-@@ -5045,7 +5663,6 @@ static int qmp_combo_typec_switch_set(struct typec_switch_dev *sw,
+@@ -5045,7 +5687,6 @@ static int qmp_combo_typec_switch_set(struct typec_switch_dev *sw,
  static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state)
  {
  	struct qmp_combo *qmp = typec_mux_get_drvdata(mux);
@@ -1123,25 +1147,10 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	enum qmpphy_mode new_mode;
  	unsigned int svid;
  
-@@ -5056,6 +5673,29 @@ static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_s
+@@ -5056,6 +5697,14 @@ static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_s
  	else
  		svid = 0;
  
-+	/*
-+	 * The USB4 router driver must excercise fine-grained control over the timing of
-+	 * USB4 QMPPHY mode entry/exit, which is difficult to otherwise ensure within Linux's
-+	 * Type-C framework if the PHY acts as a self-decisive mode mux in parallel.
-+	 *
-+	 * Keep the hardware in QMPPHY_MODE_USB4 at all times between .init and .exit of the
-+	 * (Linux) USB4 PHY and wait for the router driver to turn it off at its discretion.
-+	 * Once that happens, fall back to the usual USB3/DP/Combo mode logic.
-+	 *
-+	 * After the QMPPHY has been turned off through phy_exit(usb4_phy), the next mux_set
-+	 * will initialize it in the right mode.
-+	 */
-+	if (qmp->usb4_init_count)
-+		return 0;
-+
 +	/*
 +	 * Explicitly ignore TBT/USB4 mode requests that may come if the USB4 PHY hasn't been
 +	 * initialized, either due to the USB4 drivers being disabled or due to this PHY instance
@@ -1153,16 +1162,35 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	if (svid == USB_TYPEC_DP_SID) {
  		switch (state->mode) {
  		/* DP Only */
-@@ -5078,7 +5718,7 @@ static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_s
+@@ -5078,7 +5727,26 @@ static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_s
  		new_mode = QMPPHY_MODE_USB3_ONLY;
  	}
  
 -	if (new_mode == qmp->qmpphy_mode) {
++	/*
++	 * The USB4 router driver must excercise fine-grained control over the timing of
++	 * USB4 QMPPHY mode entry/exit, which is difficult to otherwise ensure within Linux's
++	 * Type-C framework if the PHY acts as a self-decisive mode mux in parallel.
++	 *
++	 * Keep the hardware in QMPPHY_MODE_USB4 at all times between .init and .exit of the
++	 * (Linux) USB4 PHY and wait for the router driver to turn it off at its discretion.
++	 * Once that happens, fall back to the usual USB3/DP/Combo mode logic.
++	 *
++	 * After the QMPPHY has been turned off through phy_exit(usb4_phy), it is
++	 * reconfigured for the last native mode requested in the meantime.
++	 */
++	if (qmp->usb4_init_count) {
++		qmp->typec_mode = new_mode;
++		qmp->typec_mode_pending = true;
++		return 0;
++	}
++	qmp->typec_mode_pending = false;
++
 +	if (new_mode == qmp->qmpphy_mode && qmp->com_powered_on) {
  		dev_dbg(qmp->dev, "typec_mux_set: same qmpphy mode, bail out\n");
  		return 0;
  	}
-@@ -5088,41 +5728,11 @@ static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_s
+@@ -5088,41 +5756,11 @@ static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_s
  		return 0;
  	}
  
@@ -1208,7 +1236,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  }
  
  static void qmp_combo_typec_switch_unregister(void *data)
-@@ -5293,6 +5903,7 @@ static int qmp_combo_parse_dt(struct qmp_combo *qmp)
+@@ -5293,6 +5931,7 @@ static int qmp_combo_parse_dt(struct qmp_combo *qmp)
  	const struct qmp_phy_cfg *cfg = qmp->cfg;
  	const struct qmp_combo_offsets *offs = cfg->offsets;
  	struct device *dev = qmp->dev;
@@ -1216,7 +1244,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	void __iomem *base;
  	int ret;
  
-@@ -5329,6 +5940,21 @@ static int qmp_combo_parse_dt(struct qmp_combo *qmp)
+@@ -5329,6 +5968,21 @@ static int qmp_combo_parse_dt(struct qmp_combo *qmp)
  	if (offs->aon_toggle)
  		qmp->aon_toggle = base + offs->aon_toggle;
  
@@ -1238,7 +1266,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	ret = qmp_combo_clk_init(qmp);
  	if (ret)
  		return ret;
-@@ -5339,6 +5965,21 @@ static int qmp_combo_parse_dt(struct qmp_combo *qmp)
+@@ -5339,6 +5993,21 @@ static int qmp_combo_parse_dt(struct qmp_combo *qmp)
  				"failed to get usb3_pipe clock\n");
  	}
  
@@ -1260,7 +1288,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	return 0;
  }
  
-@@ -5354,6 +5995,8 @@ static struct phy *qmp_combo_phy_xlate(struct device *dev, const struct of_phand
+@@ -5354,6 +6023,8 @@ static struct phy *qmp_combo_phy_xlate(struct device *dev, const struct of_phand
  		return qmp->usb_phy;
  	case QMP_USB43DP_DP_PHY:
  		return qmp->dp_phy;
@@ -1269,7 +1297,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	}
  
  	return ERR_PTR(-EINVAL);
-@@ -5566,6 +6209,17 @@ static int qmp_combo_probe(struct platform_device *pdev)
+@@ -5566,6 +6237,17 @@ static int qmp_combo_probe(struct platform_device *pdev)
  
  	phy_set_drvdata(qmp->dp_phy, qmp);
  
@@ -1287,7 +1315,7 @@ index d4f26809c935c31bae73ad4d264d7b8efaff1cfa..efb33ae9befd21eccba2a6a16d961c30
  	if (usb_np == dev->of_node)
  		phy_provider = devm_of_phy_provider_register(dev, qmp_combo_phy_xlate);
  	else
-@@ -5662,7 +6316,7 @@ static const struct of_device_id qmp_combo_of_match_table[] = {
+@@ -5662,7 +6344,7 @@ static const struct of_device_id qmp_combo_of_match_table[] = {
  	},
  	{
  		.compatible = "qcom,x1e80100-qmp-usb3-dp-phy",

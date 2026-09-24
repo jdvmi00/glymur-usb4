@@ -35,7 +35,9 @@ before porting or submitting changes.
 
 The public source snapshot is based on the reviewed revision
 `beb46edc9ed52b23ea68634e3ae90fe2cd15106b`. That revision corrected dependency
-descriptions without changing kernel hunks. The source fingerprints remain
+descriptions without changing kernel hunks. The 1.89 update changes seven
+files in patches 01, 05 and 07 and their fingerprints; `update_1_89` in the
+derivation record lists the inputs and method. The other fingerprints remain
 the original 1.85 values. Publication cleanup changes documentation, adds
 license texts and makes intentional assertion failures exit without system
 crash notifications. This harness adjustment does not change the extracted

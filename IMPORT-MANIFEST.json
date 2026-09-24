@@ -1,7 +1,7 @@
 {
   "schema": 3,
   "source_project": "surface-laptop-8",
-  "source_commit": "5a1b08350e42f45f83e32cdf07ace463f6cace0b",
+  "source_commit": "916fea4551f656c35f3fdaec1ad1c5a4ecf885b3",
   "purpose": "Reproducible experimental USB4/6K60 source; not an installation release",
   "files": [
     {
@@ -31,8 +31,8 @@
     },
     {
       "path": "reproduce/expected-source.sha256",
-      "sha256": "d28f15bec61110c6af6058586cb51cf0d1fbbdc20a5ee31781792992ff3e60e0",
-      "source_path": "kernel/install-candidate-1.85/expected-source.sha256"
+      "sha256": "cda64b919d39500f5a986bbeb779239805f4ec3723600b7220d9bbe44c25e7b7",
+      "source_path": "kernel/install-candidate-1.89/expected-source.sha256"
     },
     {
       "path": "reproduce/baseline/0001-net-smsc95xx-Allow-mac-address-to-be-set-as-a-parame.patch",
@@ -358,7 +358,7 @@
   "derived_files": [
     {
       "path": "patches/0001-phy-qualcomm-usb4.patch",
-      "sha256": "dc1db2f1d7cf96a09fa34baea007422f748aaf05ba411587be1402ab6147b8e4"
+      "sha256": "1d32b76518080eb0fca1492878f62760856e84c246a9f2b1b02d8c9db17d125d"
     },
     {
       "path": "patches/0002-clk-qcom-usb4.patch",
@@ -374,7 +374,7 @@
     },
     {
       "path": "patches/0005-thunderbolt-qcom-router.patch",
-      "sha256": "edef8f17c52cd220f93621b85a0856adbe9123088766c83915a55ccacd1639ce"
+      "sha256": "867f946c1e6d1a077f0d31eae49ef6f41202414b542fd7bd831b5f285c997136"
     },
     {
       "path": "patches/0006-drm-msm-dpu-routing-dsc.patch",
@@ -382,7 +382,7 @@
     },
     {
       "path": "patches/0007-drm-msm-dp-tunneling.patch",
-      "sha256": "3f62bc8650ce386f90100a66428d227e847c1674260c3c3bdf0d7c64bd8bc679"
+      "sha256": "569786e234e7cdd4f6feb87b4126af706289e81485024e7ff4728c1418865d36"
     },
     {
       "path": "patches/0008-arm64-dts-qcom-usb4.patch",
@@ -430,6 +430,27 @@
       "source_path": "kernel/usb4-candidate/test-usb4-route-restore.py",
       "source_sha256": "8ea58fa9673dff7b4bde70a2f68fb99dc47fd68d635fd1cd0208a00fed48760b",
       "change": "Include local assertion-exit handler; require exit 134 for negative controls instead of any nonzero status."
+    },
+    {
+      "path": "tests/test-usb4-port-ownership.py",
+      "sha256": "ea664a02e7ef8f2ce3ac00cb6d35adc301d649815c8b1952a6078537ba81119f",
+      "source_path": "kernel/usb4-candidate/test-usb4-port-ownership.py",
+      "source_sha256": "48ecad188c7405a014b2ede1b49f532281361a3b63f7368c87b1d64b826e2505",
+      "change": "Include local assertion-exit handler; add in-script negative controls that must exit 134 (the source suite was mutation-checked externally)."
+    },
+    {
+      "path": "tests/test-usb4-phy-typec-mode.py",
+      "sha256": "2fcd701f067f71e171af4440dbb7f3a5d867a84e1bb7163715a049e15141ba66",
+      "source_path": "kernel/usb4-candidate/test-usb4-phy-typec-mode.py",
+      "source_sha256": "b707ec7dc2c8af311df646b992bd041edd807d7606c7b3dbe2568a64dfe0ea8c",
+      "change": "Include local assertion-exit handler; add in-script negative controls that must exit 134 (the source suite was mutation-checked externally)."
+    },
+    {
+      "path": "tests/test-msm-dp-hpd-deferral.py",
+      "sha256": "ca2a3b53232c64ae42e39c63801b37f8209fb2250eae2bddf40ed664109edaec",
+      "source_path": "kernel/usb4-candidate/test-msm-dp-hpd-deferral.py",
+      "source_sha256": "86783b8d949e24ee720c276c4b93fa9b13f2479c212dc49a9439de63d4d7371f",
+      "change": "Include local assertion-exit handler; add in-script negative controls that must exit 134 (the source suite was mutation-checked externally)."
     },
     {
       "path": "tests/harness.h",

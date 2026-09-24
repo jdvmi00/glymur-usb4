@@ -93,7 +93,7 @@ def reconstruct(archive):
         # Prevent git apply from discovering a containing workspace repository
         # whose ignore rules would silently skip paths in this build directory.
         run(['git', 'init', '--quiet', TREE], log=log)
-        # The order is preserved from the recorded 1.85 PKGBUILD prepare().
+        # The order is preserved from the recorded 1.89 PKGBUILD prepare().
         # Use git apply for baseline patches just as the recipe does. No
         # PKGBUILD evaluation, make, packaging, installation or device access.
         numbers = list(range(1, 13)) + list(range(14, 20)) + [13] + list(range(20, 40))
@@ -110,7 +110,7 @@ def reconstruct(archive):
             print(f'Applying {patch.name}...', flush=True)
             run(['git', 'apply', patch], cwd=TREE, log=log)
         shutil.copy2(CANDIDATE / 'kernel.config', TREE / '.config')
-        (TREE / 'localversion.10-pkgrel').write_text('-1.85\n')
+        (TREE / 'localversion.10-pkgrel').write_text('-1.89\n')
         (TREE / 'localversion.20-pkgname').write_text('-aarch64\n')
     verify_tree()
     print('Source ready under build-output/reconstructed/linux-7.3-rc2/')
@@ -131,6 +131,9 @@ def test():
         ('test-dpu-plane-split-reset.py', [dpu / 'dpu_plane.c']),
         ('test-usb4-idle-status.py', ['--source', ctrl]),
         ('test-usb4-link-irq.py', ['--source', ctrl]),
+        ('test-usb4-port-ownership.py', ['--source', TREE / 'drivers/thunderbolt/qcom-usb4-host.c']),
+        ('test-usb4-phy-typec-mode.py', ['--source', TREE / 'drivers/phy/qualcomm/phy-qcom-qmp-combo.c']),
+        ('test-msm-dp-hpd-deferral.py', ['--source', TREE / 'drivers/gpu/drm/msm/dp/dp_display.c']),
     ]
     results = OUTPUT / 'test-results'
     results.mkdir(exist_ok=True)
@@ -139,7 +142,7 @@ def test():
         with (results / (name + '.log')).open('w') as log:
             run([sys.executable, '-B', scripts / name, *args], log=log)
         print((results / (name + '.log')).read_text(), end='')
-    print('PASS: five extracted-code test suites; no hardware validation')
+    print('PASS: eight extracted-code test suites; no hardware validation')
 
 
 def main():
