@@ -1,4 +1,4 @@
-Subject: [REVIEW 09/09] Surface Laptop 8 USB4 and display wiring
+Subject: [REVIEW 09/16] Surface Laptop 8 USB4 and display wiring
 
 Connect router 0, PHY, GLINK and DP endpoints for the 13.8-inch, 12-core Mahua Surface Laptop 8. Retain the exact tested board settings; review diagnostic defaults and board-specific assumptions.
 

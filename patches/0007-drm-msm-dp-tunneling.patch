@@ -1,8 +1,8 @@
-Subject: [REVIEW 07/09] DisplayPort tunneling, FEC and DSC startup
+Subject: [REVIEW 07/16] DisplayPort tunneling, FEC and DSC startup
 
-Integrate the USB4 provider with DP startup/shutdown, AUX/segmented EDID, FEC readiness and acknowledgment, DSC selection, and interrupt/clock sequencing. Review all failure paths and native-DP behavior. Native HPD notifications are handled in a worker, so the notifier never waits for AUX, and a withdrawn HPD stops AUX transfers to the departed sink.
+Integrate the USB4 provider with DP startup/shutdown, AUX/segmented EDID, FEC readiness and acknowledgment, DSC selection, and interrupt/clock sequencing. Review all failure paths and native-DP behavior. Native HPD notifications are handled in a worker, so the notifier never waits for AUX, and a withdrawn HPD stops AUX transfers to the departed sink. Paired system-sleep calls let the router save and restore the modeset around a USB4 stop. The manual tunnel control, the diagnostic AUX status reads during startup (whose failures could abort it) and the DSC experiment parameters are removed; routine USB4 tracing is debug output.
 
-Dependencies: Patch 05 supplies the usb4-dp.h provider interface and patch 06 the DPU side. Patch 02 is a runtime dependency rather than a symbol reference: dp_ctrl.c sets the DP input link clock rate, which needs the writable dispcc divider from 02 through the board clock bindings in 08-09. Patches 05-07 form a coupled host/display integration, not independently validated features.
+Dependencies: Patch 05 supplies the usb4-dp.h provider interface and patch 06 the DPU and KMS side. Patch 02 is a runtime dependency rather than a symbol reference: dp_ctrl.c sets the DP input link clock rate, which needs the writable dispcc divider from 02 through the board clock bindings in 08-09. Patches 05-07 form a coupled host/display integration, not independently validated features.
 
 Source attribution: Local Surface integration; provenance/usb4/21-drm-msm-dp-propagate-host-phy-init-errors.patch, provenance/display/ DSC/FEC deltas and provenance/derivation.json.
 
@@ -351,7 +351,7 @@ index 98625c9b9a0dbf701eb1532a3c0aeb34e1276b68..a1ee7cca536f655f585891d27de9ad0a
  struct drm_dp_aux *msm_dp_aux_get(struct device *dev,
  			      struct phy *phy,
 diff --git a/drivers/gpu/drm/msm/dp/dp_ctrl.c b/drivers/gpu/drm/msm/dp/dp_ctrl.c
-index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e58f30929 100644
+index 66a70436374df225387955c46b6045c51909c737..ea07f5b8c39b12976f18791767d90846f6531875 100644
 --- a/drivers/gpu/drm/msm/dp/dp_ctrl.c
 +++ b/drivers/gpu/drm/msm/dp/dp_ctrl.c
 @@ -10,11 +10,13 @@
@@ -509,7 +509,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
 +		if (ret)
 +			dev_warn(ctrl->dev, "USB4 idle status timed out: ready=%#x\n", ready);
 +		else
-+			dev_info(ctrl->dev, "USB4 idle status confirmed: ready=%#x\n", ready);
++			dev_dbg(ctrl->dev, "USB4 idle status confirmed: ready=%#x\n", ready);
 +		return;
 +	}
 +
@@ -531,7 +531,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  
  	config |= tbd << DP_CONFIGURATION_CTRL_BPC_SHIFT;
  
-@@ -449,6 +526,102 @@ static void msm_dp_ctrl_config_ctrl_link(struct msm_dp_ctrl_private *ctrl,
+@@ -449,6 +526,98 @@ static void msm_dp_ctrl_config_ctrl_link(struct msm_dp_ctrl_private *ctrl,
  	msm_dp_write_link(ctrl, REG_DP_CONFIGURATION_CTRL, config);
  }
  
@@ -567,10 +567,10 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
 +
 +	msm_dp_write_link(ctrl, REG_DP_MAINLINK_CTRL, mainlink_ctrl);
 +	if (msm_dp_aux_usb4_attached(ctrl->aux))
-+		dev_info(ctrl->dev, "USB4 FEC symbols: enable=%d mainlink=%#x config=%#x first=%#x last=%#x\n",
-+			 enable, msm_dp_read_link(ctrl, REG_DP_MAINLINK_CTRL),
-+			 msm_dp_read_link(ctrl, REG_DP_CONFIGURATION_CTRL),
-+			 msm_dp_read_link(ctrl, 0x73c), msm_dp_read_link(ctrl, 0x758));
++		dev_dbg(ctrl->dev, "USB4 FEC symbols: enable=%d mainlink=%#x config=%#x first=%#x last=%#x\n",
++			enable, msm_dp_read_link(ctrl, REG_DP_MAINLINK_CTRL),
++			msm_dp_read_link(ctrl, REG_DP_CONFIGURATION_CTRL),
++			msm_dp_read_link(ctrl, 0x73c), msm_dp_read_link(ctrl, 0x758));
 +	/* make sure the mainlink configuration is updated with the FEC sequence */
 +	wmb();
 +}
@@ -598,8 +598,8 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
 +		}
 +		if (fec_sts & DP_FEC_DECODE_EN_DETECTED) {
 +			if (msm_dp_aux_usb4_attached(ctrl->aux))
-+				dev_info(ctrl->dev, "USB4 FEC decode detected: attempt=%d status=%#x\n",
-+					 i + 1, fec_sts);
++				dev_dbg(ctrl->dev, "USB4 FEC decode detected: attempt=%d status=%#x\n",
++					i + 1, fec_sts);
 +			drm_dbg_dp(ctrl->drm_dev, "fec attempts %d status 0x%02x\n",
 +				   i + 1, fec_sts);
 +			return 0;
@@ -612,10 +612,6 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
 +	msm_dp_ctrl_fec_config(ctrl, false);
 +	return ret;
 +}
-+
-+static bool dp_dsc_enable_first;
-+module_param(dp_dsc_enable_first, bool, 0644);
-+MODULE_PARM_DESC(dp_dsc_enable_first, "DP DSC: enable FEC and the sink decoder before the video starts");
 +
 +static int msm_dp_ctrl_sink_dsc_enable(struct msm_dp_ctrl_private *ctrl, bool enable)
 +{
@@ -634,7 +630,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  static void msm_dp_ctrl_lane_mapping(struct msm_dp_ctrl_private *ctrl)
  {
  	u32 *lane_map = ctrl->link->lane_map;
-@@ -468,8 +641,11 @@ static void msm_dp_ctrl_config_misc1_misc0(struct msm_dp_ctrl_private *ctrl,
+@@ -468,8 +637,11 @@ static void msm_dp_ctrl_config_misc1_misc0(struct msm_dp_ctrl_private *ctrl,
  {
  	u32 colorimetry_cfg, test_bits_depth, misc_val;
  
@@ -648,7 +644,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  	colorimetry_cfg = msm_dp_link_get_colorimetry_config(ctrl->link);
  
  	misc_val = msm_dp_read_link(ctrl, REG_DP_MISC1_MISC0);
-@@ -1277,15 +1453,58 @@ static void msm_dp_ctrl_calc_tu_parameters(struct msm_dp_ctrl_private *ctrl,
+@@ -1277,15 +1449,58 @@ static void msm_dp_ctrl_calc_tu_parameters(struct msm_dp_ctrl_private *ctrl,
  	in.nlanes = ctrl->link->link_params.num_lanes;
  	in.bpp = panel->msm_dp_mode.bpp;
  	in.pixel_enc = panel->msm_dp_mode.out_fmt_is_yuv_420 ? 420 : 444;
@@ -711,7 +707,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  static void msm_dp_ctrl_setup_tr_unit(struct msm_dp_ctrl_private *ctrl,
  				      struct msm_dp_panel *panel)
  {
-@@ -1313,12 +1532,24 @@ static void msm_dp_ctrl_setup_tr_unit(struct msm_dp_ctrl_private *ctrl,
+@@ -1313,12 +1528,24 @@ static void msm_dp_ctrl_setup_tr_unit(struct msm_dp_ctrl_private *ctrl,
  	msm_dp_write_link(ctrl, REG_DP_VALID_BOUNDARY, valid_boundary);
  	msm_dp_write_link(ctrl, REG_DP_TU, msm_dp_tu);
  	msm_dp_write_link(ctrl, REG_DP_VALID_BOUNDARY_2, valid_boundary2);
@@ -725,18 +721,18 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
 +	if (msm_dp_aux_usb4_attached(ctrl->aux)) {
 +		u32 ready;
 +
-+		/* Diagnostic: Windows polls hardware readiness on this path. */
++		/* Poll hardware readiness on the USB4 path, as Windows does. */
 +		ret = readl_poll_timeout(ctrl->link_base + REG_DP_MAINLINK_READY,
 +				ready, ready & DP_MAINLINK_READY_FOR_VIDEO, 100, 21000);
-+		dev_info(ctrl->dev, "USB4 video readiness polled: ret %d ready %#x\n",
-+			 ret, ready);
++		dev_dbg(ctrl->dev, "USB4 video readiness polled: ret %d ready %#x\n",
++			ret, ready);
 +		return ret;
 +	}
 +
  	if (!wait_for_completion_timeout(&ctrl->video_comp,
  				WAIT_FOR_VIDEO_READY_TIMEOUT_JIFFIES)) {
  		DRM_ERROR("wait4video timedout\n");
-@@ -1563,6 +1794,10 @@ static void msm_dp_ctrl_clear_training_pattern(struct msm_dp_ctrl_private *ctrl,
+@@ -1563,6 +1790,10 @@ static void msm_dp_ctrl_clear_training_pattern(struct msm_dp_ctrl_private *ctrl,
  {
  	int delay_us;
  
@@ -747,17 +743,17 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  	msm_dp_ctrl_train_pattern_set(ctrl, DP_TRAINING_PATTERN_DISABLE, dp_phy);
  
  	delay_us = drm_dp_read_channel_eq_delay(ctrl->aux,
-@@ -1658,6 +1893,134 @@ static int msm_dp_ctrl_link_train_1_2(struct msm_dp_ctrl_private *ctrl,
+@@ -1658,6 +1889,117 @@ static int msm_dp_ctrl_link_train_1_2(struct msm_dp_ctrl_private *ctrl,
  	return 0;
  }
  
-+/* Link clocks are owned throughout these USB4 startup diagnostics. */
++/* Callers own the link clocks during USB4 stream startup. */
 +static void msm_dp_ctrl_usb4_state_log(struct msm_dp_ctrl_private *ctrl,
 +				     const char *phase)
 +{
-+	dev_info(ctrl->dev, "USB4 %s: state %#x ready %#x\n", phase,
-+		 msm_dp_read_link(ctrl, REG_DP_STATE_CTRL),
-+		 msm_dp_read_link(ctrl, REG_DP_MAINLINK_READY));
++	dev_dbg(ctrl->dev, "USB4 %s: state %#x ready %#x\n", phase,
++		msm_dp_read_link(ctrl, REG_DP_STATE_CTRL),
++		msm_dp_read_link(ctrl, REG_DP_MAINLINK_READY));
 +}
 +
 +static void msm_dp_ctrl_usb4_state_clear(struct msm_dp_ctrl_private *ctrl,
@@ -767,9 +763,9 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
 +	u32 ready = msm_dp_read_link(ctrl, REG_DP_MAINLINK_READY);
 +
 +	msm_dp_write_link(ctrl, REG_DP_STATE_CTRL, 0);
-+	dev_info(ctrl->dev, "USB4 %s: state %#x -> %#x ready %#x -> %#x\n",
-+		 phase, state, msm_dp_read_link(ctrl, REG_DP_STATE_CTRL),
-+		 ready, msm_dp_read_link(ctrl, REG_DP_MAINLINK_READY));
++	dev_dbg(ctrl->dev, "USB4 %s: state %#x -> %#x ready %#x -> %#x\n",
++		phase, state, msm_dp_read_link(ctrl, REG_DP_STATE_CTRL),
++		ready, msm_dp_read_link(ctrl, REG_DP_MAINLINK_READY));
 +}
 +
 +/* Hold the producer in reset while the USB4 receiver trains and synchronizes. */
@@ -862,27 +858,10 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
 +	ctrl->usb4_post_train_saved = false;
 +}
 +
-+/* Diagnostic candidate: preserve the raw AUX status at startup boundaries. */
-+static int msm_dp_ctrl_usb4_status_snapshot(struct msm_dp_ctrl_private *ctrl,
-+					  const char *phase)
-+{
-+	u8 status[DP_LINK_STATUS_SIZE];
-+	int ret;
-+
-+	ret = drm_dp_dpcd_read(ctrl->aux, DP_LANE0_1_STATUS, status, sizeof(status));
-+	if (ret != sizeof(status)) {
-+		dev_err(ctrl->dev, "USB4 %s DPCD read failed: %d\n", phase, ret);
-+		return ret < 0 ? ret : -EIO;
-+	}
-+	dev_info(ctrl->dev, "USB4 %s DPCD 0x202: %*ph\n", phase,
-+		 (int)sizeof(status), status);
-+	return 0;
-+}
-+
  static int msm_dp_ctrl_link_train(struct msm_dp_ctrl_private *ctrl,
  			struct msm_dp_panel *panel,
  			int *training_step)
-@@ -1672,12 +2035,61 @@ static int msm_dp_ctrl_link_train(struct msm_dp_ctrl_private *ctrl,
+@@ -1672,12 +2014,56 @@ static int msm_dp_ctrl_link_train(struct msm_dp_ctrl_private *ctrl,
  	msm_dp_ctrl_config_ctrl_link(ctrl, panel);
  	msm_dp_ctrl_config_ctrl_streams(ctrl, panel);
  
@@ -909,15 +888,10 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
 +		ret = msm_dp_aux_usb4_train_link(ctrl->aux,
 +				ctrl->link->link_params.rate,
 +				ctrl->link->link_params.num_lanes);
-+		if (!ret)
-+			ret = msm_dp_ctrl_usb4_status_snapshot(ctrl, "trained-reset-held");
 +		msm_dp_ctrl_usb4_reset(ctrl, false);
-+		if (!ret)
-+			ret = msm_dp_ctrl_usb4_status_snapshot(ctrl, "reset-released");
 +		if (!ret) {
 +			msm_dp_ctrl_usb4_post_train(ctrl, true);
 +			msm_dp_ctrl_usb4_mainlink_start(ctrl);
-+			ret = msm_dp_ctrl_usb4_status_snapshot(ctrl, "mainlink-enabled");
 +		}
 +		return ret;
 +	}
@@ -944,7 +918,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  	if (drm_dp_max_downspread(dpcd))
  		encoding[0] |= DP_SPREAD_AMP_0_5;
  
-@@ -1723,6 +2135,12 @@ static int msm_dp_ctrl_setup_main_link(struct msm_dp_ctrl_private *ctrl,
+@@ -1723,6 +2109,12 @@ static int msm_dp_ctrl_setup_main_link(struct msm_dp_ctrl_private *ctrl,
  {
  	int ret = 0;
  
@@ -957,7 +931,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  	msm_dp_ctrl_mainlink_enable(ctrl);
  
  	if (ctrl->link->sink_request & DP_TEST_LINK_PHY_TEST_PATTERN)
-@@ -1783,6 +2201,59 @@ void msm_dp_ctrl_core_clk_disable(struct msm_dp_ctrl *msm_dp_ctrl)
+@@ -1783,6 +2175,59 @@ void msm_dp_ctrl_core_clk_disable(struct msm_dp_ctrl *msm_dp_ctrl)
  		   str_on_off(ctrl->core_clks_on));
  }
  
@@ -1009,15 +983,15 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
 +	    clk_get_rate(ctrl->link_clks[0].clk) != link_rate)
 +		return -ERANGE;
 +
-+	dev_info(ctrl->dev, "USB4 DP-IN clock %lu Hz, link %lu Hz, divisor %u\n",
-+		 dpin_rate, link_rate, div);
++	dev_dbg(ctrl->dev, "USB4 DP-IN clock %lu Hz, link %lu Hz, divisor %u\n",
++		dpin_rate, link_rate, div);
 +	return 0;
 +}
 +
  static int msm_dp_ctrl_link_clk_enable(struct msm_dp_ctrl *msm_dp_ctrl)
  {
  	struct msm_dp_ctrl_private *ctrl;
-@@ -1798,15 +2269,55 @@ static int msm_dp_ctrl_link_clk_enable(struct msm_dp_ctrl *msm_dp_ctrl)
+@@ -1798,15 +2243,55 @@ static int msm_dp_ctrl_link_clk_enable(struct msm_dp_ctrl *msm_dp_ctrl)
  	if (!ctrl->core_clks_on) {
  		drm_dbg_dp(ctrl->drm_dev, "Enable core clks before link clks\n");
  
@@ -1037,8 +1011,8 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
 +		ctrl->usb4_clk_sel_saved = true;
 +		msm_dp_write_ahb(ctrl, REG_DP_USB4_CLK_SEL,
 +				 value & ~DP_USB4_CLK_SEL_NATIVE);
-+		dev_info(ctrl->dev, "USB4 clock select: %#x -> %#x\n", value,
-+			 msm_dp_read_ahb(ctrl, REG_DP_USB4_CLK_SEL));
++		dev_dbg(ctrl->dev, "USB4 clock select: %#x -> %#x\n", value,
++			msm_dp_read_ahb(ctrl, REG_DP_USB4_CLK_SEL));
  	}
  
  	ret = clk_bulk_prepare_enable(ctrl->num_link_clks, ctrl->link_clks);
@@ -1075,7 +1049,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  	drm_dbg_dp(ctrl->drm_dev, "enable link clocks\n");
  	drm_dbg_dp(ctrl->drm_dev, "stream_clks:%s link_clks:%s core_clks:%s\n",
  		   str_on_off(ctrl->stream_clks_on),
-@@ -1814,6 +2325,15 @@ static int msm_dp_ctrl_link_clk_enable(struct msm_dp_ctrl *msm_dp_ctrl)
+@@ -1814,6 +2299,15 @@ static int msm_dp_ctrl_link_clk_enable(struct msm_dp_ctrl *msm_dp_ctrl)
  		   str_on_off(ctrl->core_clks_on));
  
  	return 0;
@@ -1091,7 +1065,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  }
  
  static void msm_dp_ctrl_link_clk_disable(struct msm_dp_ctrl *msm_dp_ctrl)
-@@ -1822,8 +2342,32 @@ static void msm_dp_ctrl_link_clk_disable(struct msm_dp_ctrl *msm_dp_ctrl)
+@@ -1822,8 +2316,32 @@ static void msm_dp_ctrl_link_clk_disable(struct msm_dp_ctrl *msm_dp_ctrl)
  
  	ctrl = container_of(msm_dp_ctrl, struct msm_dp_ctrl_private, msm_dp_ctrl);
  
@@ -1124,121 +1098,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  	ctrl->link_clks_on = false;
  
  	drm_dbg_dp(ctrl->drm_dev, "disabled link clocks\n");
-@@ -1833,10 +2377,121 @@ static void msm_dp_ctrl_link_clk_disable(struct msm_dp_ctrl *msm_dp_ctrl)
- 		   str_on_off(ctrl->core_clks_on));
- }
- 
-+/*
-+ * USB4 DisplayPort tunneling bring-up: run the DP PHY PLL and the link clocks
-+ * (including the DP IN branch) at the requested rate without a sink, so the
-+ * router's DP IN adapter sees a live link clock. @rate is in kHz (e.g.
-+ * 810000 for HBR3). Returns 0 or a negative error.
-+ */
-+int msm_dp_ctrl_usb4_tunnel_prepare(struct msm_dp_ctrl *msm_dp_ctrl, bool on,
-+				    u32 rate, u32 lanes)
-+{
-+	struct msm_dp_ctrl_private *ctrl;
-+	int ret;
-+
-+	ctrl = container_of(msm_dp_ctrl, struct msm_dp_ctrl_private, msm_dp_ctrl);
-+
-+	if (!on) {
-+		if (ctrl->dpin_clk_on) {
-+			clk_disable_unprepare(ctrl->dpin_clk);
-+			ctrl->dpin_clk_on = false;
-+		}
-+		if (ctrl->link_clks_on)
-+			msm_dp_ctrl_link_clk_disable(msm_dp_ctrl);
-+		phy_power_off(ctrl->phy);
-+		dev_pm_opp_set_rate(ctrl->dev, 0);
-+		return 0;
-+	}
-+
-+	if (!ctrl->dpin_clk)
-+		return -ENODEV;
-+
-+	ret = msm_dp_ctrl_core_clk_enable(msm_dp_ctrl);
-+	if (ret)
-+		return ret;
-+
-+	ctrl->link->link_params.rate = rate;
-+	ctrl->link->link_params.num_lanes = lanes;
-+	ctrl->phy_opts.dp.lanes = lanes;
-+	ctrl->phy_opts.dp.link_rate = rate / 100;
-+	ctrl->phy_opts.dp.ssc = 0;
-+
-+	ret = phy_configure(ctrl->phy, &ctrl->phy_opts);
-+	if (ret)
-+		return ret;
-+	ret = phy_power_on(ctrl->phy);
-+	if (ret)
-+		return ret;
-+
-+	dev_pm_opp_set_rate(ctrl->dev, (unsigned long)rate * 1000);
-+	ret = msm_dp_ctrl_link_clk_enable(msm_dp_ctrl);
-+	if (ret)
-+		goto err_phy;
-+
-+	ret = clk_prepare_enable(ctrl->dpin_clk);
-+	if (ret)
-+		goto err_link;
-+	ctrl->dpin_clk_on = true;
-+
-+	dev_info(ctrl->dev, "USB4 tunnel prepare: link %u kHz x%u, dpin clock %lu Hz\n",
-+		 rate, lanes, clk_get_rate(ctrl->dpin_clk));
-+	return 0;
-+
-+err_link:
-+	msm_dp_ctrl_link_clk_disable(msm_dp_ctrl);
-+err_phy:
-+	phy_power_off(ctrl->phy);
-+	dev_pm_opp_set_rate(ctrl->dev, 0);
-+	return ret;
-+}
-+
-+/*
-+ * USB4 DisplayPort tunneling bring-up: after msm_dp_ctrl_usb4_tunnel_prepare(),
-+ * drive the main link into the router's DP IN adapter with training pattern 1
-+ * (no sink, no AUX), or stop it again. Mirrors the controller state the
-+ * Windows driver has when it issues the router's DP IN enable.
-+ */
-+int msm_dp_ctrl_usb4_tunnel_link(struct msm_dp_ctrl *msm_dp_ctrl, bool on)
-+{
-+	struct msm_dp_ctrl_private *ctrl;
-+	u32 config;
-+	int ret;
-+
-+	ctrl = container_of(msm_dp_ctrl, struct msm_dp_ctrl_private, msm_dp_ctrl);
-+	if (!ctrl->link_clks_on)
-+		return -ENODEV;
-+
-+	if (!on) {
-+		msm_dp_write_link(ctrl, REG_DP_STATE_CTRL, 0);
-+		msm_dp_ctrl_mainlink_disable(ctrl);
-+		return 0;
-+	}
-+
-+	ctrl->link->lane_map[0] = 0;
-+	ctrl->link->lane_map[1] = 1;
-+	ctrl->link->lane_map[2] = 2;
-+	ctrl->link->lane_map[3] = 3;
-+	msm_dp_ctrl_mainlink_enable(ctrl);
-+	msm_dp_ctrl_lane_mapping(ctrl);
-+
-+	config = 2 << DP_CONFIGURATION_CTRL_LSCLK_DIV_SHIFT;
-+	config |= (ctrl->link->link_params.num_lanes - 1)
-+			<< DP_CONFIGURATION_CTRL_NUM_OF_LANES_SHIFT;
-+	config |= DP_CONFIGURATION_CTRL_P_INTERLACED;
-+	config |= DP_CONFIGURATION_CTRL_STATIC_DYNAMIC_CN;
-+	config |= DP_CONFIGURATION_CTRL_SYNC_ASYNC_CLK;
-+	msm_dp_write_link(ctrl, REG_DP_CONFIGURATION_CTRL, config);
-+
-+	ret = msm_dp_ctrl_set_pattern_state_bit(ctrl, 1);
-+	dev_info(ctrl->dev, "USB4 tunnel link: mainlink %08x config %08x pattern1 ret %d\n",
-+		 msm_dp_read_link(ctrl, REG_DP_MAINLINK_CTRL), config, ret);
-+	return ret;
-+}
-+
+@@ -1836,7 +2354,7 @@ static void msm_dp_ctrl_link_clk_disable(struct msm_dp_ctrl *msm_dp_ctrl)
  static int msm_dp_ctrl_enable_mainlink_clocks(struct msm_dp_ctrl_private *ctrl,
  					      struct msm_dp_panel *panel)
  {
@@ -1247,7 +1107,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  	struct phy *phy = ctrl->phy;
  	const u8 *dpcd = panel->dpcd;
  
-@@ -1858,11 +2513,29 @@ static int msm_dp_ctrl_enable_mainlink_clocks(struct msm_dp_ctrl_private *ctrl,
+@@ -1858,11 +2376,29 @@ static int msm_dp_ctrl_enable_mainlink_clocks(struct msm_dp_ctrl_private *ctrl,
  
  	dev_pm_opp_set_rate(ctrl->dev, ctrl->link->link_params.rate * 1000);
  	ret = msm_dp_ctrl_link_clk_enable(&ctrl->msm_dp_ctrl);
@@ -1278,7 +1138,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  	return ret;
  }
  
-@@ -1973,7 +2646,7 @@ static void msm_dp_ctrl_phy_reset(struct msm_dp_ctrl_private *ctrl)
+@@ -1973,7 +2509,7 @@ static void msm_dp_ctrl_phy_reset(struct msm_dp_ctrl_private *ctrl)
  	msm_dp_write_ahb(ctrl, REG_DP_PHY_CTRL, 0x0);
  }
  
@@ -1287,7 +1147,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  {
  	struct msm_dp_ctrl_private *ctrl;
  	struct phy *phy;
-@@ -1982,7 +2655,7 @@ void msm_dp_ctrl_phy_init(struct msm_dp_ctrl *msm_dp_ctrl)
+@@ -1982,7 +2518,7 @@ void msm_dp_ctrl_phy_init(struct msm_dp_ctrl *msm_dp_ctrl)
  	phy = ctrl->phy;
  
  	msm_dp_ctrl_phy_reset(ctrl);
@@ -1296,20 +1156,20 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  }
  
  void msm_dp_ctrl_phy_exit(struct msm_dp_ctrl *msm_dp_ctrl)
-@@ -1993,8 +2666,12 @@ void msm_dp_ctrl_phy_exit(struct msm_dp_ctrl *msm_dp_ctrl)
+@@ -1993,8 +2529,12 @@ void msm_dp_ctrl_phy_exit(struct msm_dp_ctrl *msm_dp_ctrl)
  	ctrl = container_of(msm_dp_ctrl, struct msm_dp_ctrl_private, msm_dp_ctrl);
  	phy = ctrl->phy;
  
-+	dev_info(ctrl->dev, "DP PHY exit: reset enter core=%d link=%d dpin=%d\n",
-+		 ctrl->core_clks_on, ctrl->link_clks_on, ctrl->dpin_clk_on);
++	dev_dbg(ctrl->dev, "DP PHY exit: reset enter core=%d link=%d dpin=%d\n",
++		ctrl->core_clks_on, ctrl->link_clks_on, ctrl->dpin_clk_on);
  	msm_dp_ctrl_phy_reset(ctrl);
-+	dev_info(ctrl->dev, "DP PHY exit: reset returned, phy_exit enter\n");
++	dev_dbg(ctrl->dev, "DP PHY exit: reset returned, phy_exit enter\n");
  	phy_exit(phy);
-+	dev_info(ctrl->dev, "DP PHY exit: phy_exit returned\n");
++	dev_dbg(ctrl->dev, "DP PHY exit: phy_exit returned\n");
  }
  
  static int msm_dp_ctrl_reinitialize_mainlink(struct msm_dp_ctrl_private *ctrl,
-@@ -2034,6 +2711,10 @@ static int msm_dp_ctrl_deinitialize_mainlink(struct msm_dp_ctrl_private *ctrl,
+@@ -2034,6 +2574,10 @@ static int msm_dp_ctrl_deinitialize_mainlink(struct msm_dp_ctrl_private *ctrl,
  
  	phy = ctrl->phy;
  
@@ -1320,7 +1180,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  	msm_dp_ctrl_mainlink_disable(ctrl);
  
  	msm_dp_ctrl_reset(&ctrl->msm_dp_ctrl, panel);
-@@ -2402,6 +3083,9 @@ int msm_dp_ctrl_on_link(struct msm_dp_ctrl *msm_dp_ctrl,
+@@ -2402,6 +2946,9 @@ int msm_dp_ctrl_on_link(struct msm_dp_ctrl *msm_dp_ctrl,
  		if (rc == 0) {
  			/* training completed successfully */
  			break;
@@ -1330,7 +1190,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  		} else if (training_step == DP_TRAINING_1) {
  			/* link train_1 failed */
  			if (!msm_dp_aux_link_plugged(ctrl->aux))
-@@ -2620,13 +3304,27 @@ int msm_dp_ctrl_on_stream(struct msm_dp_ctrl *msm_dp_ctrl, struct msm_dp_panel *
+@@ -2620,6 +3167,8 @@ int msm_dp_ctrl_on_stream(struct msm_dp_ctrl *msm_dp_ctrl, struct msm_dp_panel *
  
  	if (msm_dp_ctrl->wide_bus_en || panel->msm_dp_mode.out_fmt_is_yuv_420)
  		pixel_rate >>= 1;
@@ -1339,26 +1199,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  
  	drm_dbg_dp(ctrl->drm_dev, "pixel_rate=%lu\n", pixel_rate);
  
-+	if (msm_dp_aux_usb4_attached(ctrl->aux)) {
-+		ret = msm_dp_ctrl_usb4_status_snapshot(ctrl, "before-pixel-clock");
-+		if (ret)
-+			return ret;
-+	}
-+
- 	ret = msm_dp_ctrl_on_pixel_clk(ctrl, pixel_rate);
- 	if (ret)
- 		return ret;
- 
-+	if (msm_dp_aux_usb4_attached(ctrl->aux)) {
-+		ret = msm_dp_ctrl_usb4_status_snapshot(ctrl, "after-pixel-clock");
-+		if (ret)
-+			return ret;
-+	}
-+
- 	/*
- 	 * Set up transfer unit values and set controller state to send
- 	 * video.
-@@ -2644,20 +3342,63 @@ int msm_dp_ctrl_on_stream(struct msm_dp_ctrl *msm_dp_ctrl, struct msm_dp_panel *
+@@ -2644,19 +3193,41 @@ int msm_dp_ctrl_on_stream(struct msm_dp_ctrl *msm_dp_ctrl, struct msm_dp_panel *
  		pixel_rate_orig,
  		panel->msm_dp_mode.out_fmt_is_yuv_420);
  
@@ -1367,23 +1208,8 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  
  	msm_dp_ctrl_setup_tr_unit(ctrl, panel);
  
-+	if (panel->msm_dp_mode.dsc_en && dp_dsc_enable_first) {
-+		ret = msm_dp_ctrl_fec_start(ctrl);
-+		if (ret)
-+			return ret;
-+		ret = msm_dp_ctrl_sink_dsc_enable(ctrl, true);
-+		if (ret) {
-+			msm_dp_ctrl_fec_config(ctrl, false);
-+			return ret;
-+		}
-+	}
-+
-+	if (msm_dp_aux_usb4_attached(ctrl->aux)) {
-+		ret = msm_dp_ctrl_usb4_status_snapshot(ctrl, "stream-configured");
-+		if (ret)
-+			return ret;
++	if (msm_dp_aux_usb4_attached(ctrl->aux))
 +		msm_dp_ctrl_usb4_state_clear(ctrl, "pre-video");
-+	}
  	msm_dp_write_link(ctrl, REG_DP_STATE_CTRL, DP_STATE_CTRL_SEND_VIDEO);
 +	if (msm_dp_aux_usb4_attached(ctrl->aux))
 +		msm_dp_ctrl_usb4_state_log(ctrl, "send-video");
@@ -1391,22 +1217,21 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  	ret = msm_dp_ctrl_wait4video_ready(ctrl);
 -	if (ret)
 +	if (ret) {
-+		if (msm_dp_aux_usb4_attached(ctrl->aux)) {
++		if (msm_dp_aux_usb4_attached(ctrl->aux))
 +			msm_dp_ctrl_usb4_state_log(ctrl, "video-timeout");
-+			msm_dp_ctrl_usb4_status_snapshot(ctrl, "video-timeout");
-+		}
  		return ret;
 +	}
  
  	mainlink_ready = msm_dp_ctrl_mainlink_ready(ctrl);
 +	if (msm_dp_aux_usb4_attached(ctrl->aux))
-+		dev_info(ctrl->dev, "USB4 video readiness confirmed, mainlink ready %d\n",
-+			 mainlink_ready);
++		dev_dbg(ctrl->dev, "USB4 video readiness confirmed, mainlink ready %d\n",
++			mainlink_ready);
  	drm_dbg_dp(ctrl->drm_dev,
- 		"mainlink %s\n", mainlink_ready ? "READY" : "NOT READY");
- 
+-		"mainlink %s\n", mainlink_ready ? "READY" : "NOT READY");
++		   "mainlink %s\n", mainlink_ready ? "READY" : "NOT READY");
++
 +	/* FEC follows link training, then the sink starts decompressing */
-+	if (panel->msm_dp_mode.dsc_en && !dp_dsc_enable_first) {
++	if (panel->msm_dp_mode.dsc_en) {
 +		ret = msm_dp_ctrl_fec_start(ctrl);
 +		if (ret)
 +			return ret;
@@ -1416,15 +1241,10 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
 +			return ret;
 +		}
 +	}
-+	if (panel->msm_dp_mode.dsc_en && msm_dp_panel_dsc_pps_late()) {
-+		usleep_range(20000, 21000);
-+		msm_dp_panel_dsc_config(panel, true);
-+	}
-+
+ 
  	/* The standalone v8 eDP PHY uses a separate LDO setting for video. */
  	if (mainlink_ready &&
- 	    panel->connector->connector_type == DRM_MODE_CONNECTOR_eDP &&
-@@ -2692,6 +3433,18 @@ void msm_dp_ctrl_off_link(struct msm_dp_ctrl *msm_dp_ctrl,
+@@ -2692,6 +3263,18 @@ void msm_dp_ctrl_off_link(struct msm_dp_ctrl *msm_dp_ctrl,
  
  	msm_dp_panel_disable_vsc_sdp(panel);
  
@@ -1443,7 +1263,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  	msm_dp_ctrl_mainlink_disable(ctrl);
  
  	msm_dp_ctrl_reset(&ctrl->msm_dp_ctrl, panel);
-@@ -2794,6 +3547,16 @@ static int msm_dp_ctrl_clk_init(struct msm_dp_ctrl *msm_dp_ctrl)
+@@ -2794,6 +3377,16 @@ static int msm_dp_ctrl_clk_init(struct msm_dp_ctrl *msm_dp_ctrl)
  	if (rc)
  		return rc;
  
@@ -1460,7 +1280,7 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  	ctrl->pixel_clk = devm_clk_get(dev, "stream_pixel");
  	if (IS_ERR(ctrl->pixel_clk))
  		return PTR_ERR(ctrl->pixel_clk);
-@@ -2833,6 +3596,7 @@ struct msm_dp_ctrl *msm_dp_ctrl_get(struct device *dev, struct msm_dp_link *link
+@@ -2833,6 +3426,7 @@ struct msm_dp_ctrl *msm_dp_ctrl_get(struct device *dev, struct msm_dp_link *link
  	if (ret)
  		dev_err(dev, "failed to add DP OPP table\n");
  
@@ -1469,18 +1289,15 @@ index 66a70436374df225387955c46b6045c51909c737..e506a2597d0207f250b487d56552451e
  	init_completion(&ctrl->psr_op_comp);
  	init_completion(&ctrl->video_comp);
 diff --git a/drivers/gpu/drm/msm/dp/dp_ctrl.h b/drivers/gpu/drm/msm/dp/dp_ctrl.h
-index 5902cf7e746a48f05ddfadac6c9e25d1b38838a3..2a431d092f075bc4194791da34bb1d70edfd37a7 100644
+index 5902cf7e746a48f05ddfadac6c9e25d1b38838a3..42c5f847cb023d3e7bb33d026c06222701059e80 100644
 --- a/drivers/gpu/drm/msm/dp/dp_ctrl.h
 +++ b/drivers/gpu/drm/msm/dp/dp_ctrl.h
-@@ -39,7 +39,10 @@ struct msm_dp_ctrl *msm_dp_ctrl_get(struct device *dev,
+@@ -39,7 +39,7 @@ struct msm_dp_ctrl *msm_dp_ctrl_get(struct device *dev,
  
  void msm_dp_ctrl_reset(struct msm_dp_ctrl *msm_dp_ctrl,
  		       struct msm_dp_panel *panel);
 -void msm_dp_ctrl_phy_init(struct msm_dp_ctrl *msm_dp_ctrl);
 +int msm_dp_ctrl_phy_init(struct msm_dp_ctrl *msm_dp_ctrl);
-+int msm_dp_ctrl_usb4_tunnel_prepare(struct msm_dp_ctrl *msm_dp_ctrl, bool on,
-+				    u32 rate, u32 lanes);
-+int msm_dp_ctrl_usb4_tunnel_link(struct msm_dp_ctrl *msm_dp_ctrl, bool on);
  void msm_dp_ctrl_phy_exit(struct msm_dp_ctrl *msm_dp_ctrl);
  void msm_dp_ctrl_irq_phy_exit(struct msm_dp_ctrl *msm_dp_ctrl);
  
@@ -1516,7 +1333,7 @@ index cf3838fcd154e67b6bd8f6321a8711419543abcb..5d5ebcb7bc8e3d00c0831a4b50513bf5
  	/* Link Information */
  	seq_printf(seq, "\tdp_link:\n\t\ttest_requested = %d\n",
 diff --git a/drivers/gpu/drm/msm/dp/dp_display.c b/drivers/gpu/drm/msm/dp/dp_display.c
-index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e19f9ffd2 100644
+index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..325dbc9bc48e0e3a812af01fe3446ba79cba8dd5 100644
 --- a/drivers/gpu/drm/msm/dp/dp_display.c
 +++ b/drivers/gpu/drm/msm/dp/dp_display.c
 @@ -12,6 +12,9 @@
@@ -1529,7 +1346,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  #include <drm/display/drm_dp_aux_bus.h>
  #include <drm/display/drm_hdmi_audio_helper.h>
  #include <drm/drm_edid.h>
-@@ -51,11 +54,33 @@ struct msm_dp_display_private {
+@@ -51,11 +54,32 @@ struct msm_dp_display_private {
  	/* state variables */
  	bool core_initialized;
  	bool phy_initialized;
@@ -1542,7 +1359,6 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
 +	wait_queue_head_t usb4_stop_wait;
 +	bool usb4_bound;
 +	bool usb4_attached;
-+	bool usb4_manual_on;
 +	bool usb4_connected;
 +	bool usb4_irq;
 +
@@ -1563,7 +1379,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  	struct drm_device *drm_dev;
  
  	struct drm_dp_aux *aux;
-@@ -202,6 +227,9 @@ void msm_dp_display_signal_audio_complete(struct msm_dp *msm_dp_display)
+@@ -202,6 +226,9 @@ void msm_dp_display_signal_audio_complete(struct msm_dp *msm_dp_display)
  	complete_all(&dp->audio_comp);
  }
  
@@ -1573,7 +1389,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  static int msm_dp_display_bind(struct device *dev, struct device *master,
  			   void *data)
  {
-@@ -221,6 +249,9 @@ static int msm_dp_display_bind(struct device *dev, struct device *master,
+@@ -221,6 +248,9 @@ static int msm_dp_display_bind(struct device *dev, struct device *master,
  		goto end;
  	}
  
@@ -1583,7 +1399,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  	return 0;
  end:
  	return rc;
-@@ -232,6 +263,12 @@ static void msm_dp_display_unbind(struct device *dev, struct device *master,
+@@ -232,6 +262,12 @@ static void msm_dp_display_unbind(struct device *dev, struct device *master,
  	struct msm_dp_display_private *dp = dev_get_dp_display_private(dev);
  	struct msm_drm_private *priv = dev_get_drvdata(master);
  
@@ -1596,7 +1412,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  	of_dp_aux_depopulate_bus(dp->aux);
  
  	msm_dp_aux_unregister(dp->aux);
-@@ -322,22 +359,36 @@ end:
+@@ -322,22 +358,36 @@ end:
   *
   * Prepare DP PHY for the AUX transactions to succeed.
   *
@@ -1639,7 +1455,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  }
  
  static void msm_dp_display_host_phy_exit(struct msm_dp_display_private *dp)
-@@ -400,6 +451,13 @@ static int msm_dp_display_handle_irq_hpd(struct msm_dp_display_private *dp)
+@@ -400,6 +450,13 @@ static int msm_dp_display_handle_irq_hpd(struct msm_dp_display_private *dp)
  	return 0;
  }
  
@@ -1653,7 +1469,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  static int msm_dp_hpd_plug_handle(struct msm_dp_display_private *dp)
  {
  	int ret;
-@@ -417,9 +475,17 @@ static int msm_dp_hpd_plug_handle(struct msm_dp_display_private *dp)
+@@ -417,9 +474,17 @@ static int msm_dp_hpd_plug_handle(struct msm_dp_display_private *dp)
  		return ret;
  	}
  
@@ -1673,7 +1489,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  
  	ret = msm_dp_display_process_hpd_high(dp);
  
-@@ -452,6 +518,7 @@ static int msm_dp_hpd_unplug_handle(struct msm_dp_display_private *dp)
+@@ -452,6 +517,7 @@ static int msm_dp_hpd_unplug_handle(struct msm_dp_display_private *dp)
  
  	dp->panel->video_test = false;
  
@@ -1681,7 +1497,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  	msm_dp_aux_enable_xfers(dp->aux, false);
  
  	drm_dbg_dp(dp->drm_dev, "Before, type=%d sink_count=%d\n",
-@@ -488,7 +555,9 @@ static int msm_dp_hpd_unplug_handle(struct msm_dp_display_private *dp)
+@@ -488,7 +554,9 @@ static int msm_dp_hpd_unplug_handle(struct msm_dp_display_private *dp)
  			dp->link->sink_count);
  
  	if (dp->plugged) {
@@ -1691,7 +1507,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  		dp->plugged = false;
  	}
  
-@@ -523,6 +592,212 @@ static int msm_dp_irq_hpd_handle(struct msm_dp_display_private *dp)
+@@ -523,6 +591,268 @@ static int msm_dp_irq_hpd_handle(struct msm_dp_display_private *dp)
  	return rc;
  }
  
@@ -1750,7 +1566,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
 +		ret = -EPROBE_DEFER;
 +		goto out;
 +	}
-+	if (dp->usb4_attached || dp->usb4_manual_on || dp->plugged || dp->link_pm_ref) {
++	if (dp->usb4_attached || dp->plugged || dp->link_pm_ref) {
 +		ret = -EBUSY;
 +		goto out;
 +	}
@@ -1812,21 +1628,77 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
 +}
 +EXPORT_SYMBOL_GPL(msm_dp_usb4_hpd);
 +
++int msm_dp_usb4_sleep_prepare(struct device *dev)
++{
++	struct msm_dp_display_private *dp;
++	int ret;
++
++	if (!dev)
++		return -ENODEV;
++	device_lock(dev);
++	if (!dev_get_drvdata(dev)) {
++		ret = -ENODEV;
++		goto out;
++	}
++	dp = dev_get_dp_display_private(dev);
++	if (!dp || !dp->drm_dev || !dp->usb4_attached) {
++		ret = -ENODEV;
++		goto out;
++	}
++	/* Drain HPD before taking the atomic snapshot, without a modeset lock. */
++	flush_work(&dp->usb4_hpd_work);
++	ret = msm_kms_usb4_sleep_prepare(dp->drm_dev);
++	dev_dbg(dev, "USB4 sleep modeset saved: ret=%d power=%d link_ref=%d\n",
++		ret, dp->msm_dp_display.power_on, dp->link_pm_ref);
++out:
++	device_unlock(dev);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(msm_dp_usb4_sleep_prepare);
++
++int msm_dp_usb4_sleep_complete(struct device *dev)
++{
++	struct msm_dp_display_private *dp;
++	int ret;
++
++	if (!dev)
++		return -ENODEV;
++	device_lock(dev);
++	if (!dev_get_drvdata(dev)) {
++		ret = -ENODEV;
++		goto out;
++	}
++	dp = dev_get_dp_display_private(dev);
++	if (!dp || !dp->drm_dev) {
++		ret = -ENODEV;
++		goto out;
++	}
++	flush_work(&dp->usb4_hpd_work);
++	ret = msm_kms_usb4_sleep_complete(dp->drm_dev);
++	dev_dbg(dev, "USB4 sleep modeset restored: ret=%d power=%d link_ref=%d\n",
++		ret, dp->msm_dp_display.power_on, dp->link_pm_ref);
++out:
++	device_unlock(dev);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(msm_dp_usb4_sleep_complete);
++
 +/* Stop reporting HPD before release. DRM owns active-stream teardown. */
 +static int msm_dp_usb4_hpd_sync_locked(struct device *dev, bool connected, bool irq)
 +{
 +	struct msm_dp_display_private *dp;
 +	int ret;
 +
-+	dev_info(dev, "USB4 HPD sync: enter connected=%d\n", connected);
++	dev_dbg(dev, "USB4 HPD sync: enter connected=%d\n", connected);
 +	ret = msm_dp_usb4_hpd_locked(dev, connected, irq);
 +	if (ret)
 +		return ret;
 +	dp = dev_get_dp_display_private(dev);
-+	dev_info(dev, "USB4 HPD sync: flush enter\n");
++	dev_dbg(dev, "USB4 HPD sync: flush enter\n");
 +	flush_work(&dp->usb4_hpd_work);
-+	dev_info(dev, "USB4 HPD sync: flush returned power=%d link_ref=%d phy=%d core=%d\n",
-+		 dp->msm_dp_display.power_on, dp->link_pm_ref, dp->phy_initialized, dp->core_initialized);
++	dev_dbg(dev, "USB4 HPD sync: flush returned power=%d link_ref=%d phy=%d core=%d\n",
++		dp->msm_dp_display.power_on, dp->link_pm_ref,
++		dp->phy_initialized, dp->core_initialized);
 +	if (!connected) {
 +		/* Userspace completes the atomic disable after HPD. Do not report
 +		 * release failure just because that commit has not run yet.
@@ -1840,15 +1712,15 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
 +			ret = -EBUSY;
 +		} else if (dp->phy_initialized) {
 +			/* Unplug may already have dropped its runtime-PM reference. */
-+			dev_info(dev, "USB4 HPD sync: resume for PHY exit\n");
++			dev_dbg(dev, "USB4 HPD sync: resume for PHY exit\n");
 +			ret = pm_runtime_resume_and_get(dev);
-+			dev_info(dev, "USB4 HPD sync: resume returned %d\n", ret);
++			dev_dbg(dev, "USB4 HPD sync: resume returned %d\n", ret);
 +			if (!ret) {
-+				dev_info(dev, "USB4 HPD sync: PHY exit enter\n");
++				dev_dbg(dev, "USB4 HPD sync: PHY exit enter\n");
 +				msm_dp_display_host_phy_exit(dp);
-+				dev_info(dev, "USB4 HPD sync: PHY exit returned, runtime put\n");
++				dev_dbg(dev, "USB4 HPD sync: PHY exit returned, runtime put\n");
 +				pm_runtime_put_sync(dev);
-+				dev_info(dev, "USB4 HPD sync: runtime put returned\n");
++				dev_dbg(dev, "USB4 HPD sync: runtime put returned\n");
 +			}
 +		}
 +		mutex_unlock(&dp->usb4_link_lock);
@@ -1904,7 +1776,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  static void msm_dp_display_deinit_sub_modules(struct msm_dp_display_private *dp)
  {
  	msm_dp_audio_put(dp->audio);
-@@ -595,6 +870,12 @@ error:
+@@ -595,6 +925,12 @@ error:
  	return rc;
  }
  
@@ -1917,7 +1789,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  static int msm_dp_display_set_mode(struct msm_dp *msm_dp_display,
  				   const struct drm_display_mode *adjusted_mode,
  				   struct msm_dp_panel *msm_dp_panel)
-@@ -611,6 +892,24 @@ static int msm_dp_display_set_mode(struct msm_dp *msm_dp_display,
+@@ -611,6 +947,24 @@ static int msm_dp_display_set_mode(struct msm_dp *msm_dp_display,
  
  	msm_dp_panel_init_panel_info(msm_dp_panel, adjusted_mode, bpp ? bpp : 24);
  
@@ -1942,7 +1814,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  	/* populate wide_bus_support to different layers */
  	dp->ctrl->wide_bus_en =
  		msm_dp_panel->msm_dp_mode.out_fmt_is_yuv_420 ? false : dp->wide_bus_supported;
-@@ -625,8 +924,11 @@ static int msm_dp_display_prepare_link(struct msm_dp_display_private *dp)
+@@ -625,8 +979,11 @@ static int msm_dp_display_prepare_link(struct msm_dp_display_private *dp)
  
  	drm_dbg_dp(dp->drm_dev, "sink_count=%d\n", dp->link->sink_count);
  
@@ -1956,7 +1828,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  
  	rc = pm_runtime_resume_and_get(&msm_dp_display->pdev->dev);
  	if (rc) {
-@@ -634,11 +936,15 @@ static int msm_dp_display_prepare_link(struct msm_dp_display_private *dp)
+@@ -634,11 +991,15 @@ static int msm_dp_display_prepare_link(struct msm_dp_display_private *dp)
  		return rc;
  	}
  
@@ -1973,7 +1845,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  		force_link_train = true;
  	}
  
-@@ -649,6 +955,12 @@ static int msm_dp_display_prepare_link(struct msm_dp_display_private *dp)
+@@ -649,6 +1010,12 @@ static int msm_dp_display_prepare_link(struct msm_dp_display_private *dp)
  		return rc;
  	}
  
@@ -1986,34 +1858,10 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  	return msm_dp_ctrl_prepare_stream_on(dp->ctrl, dp->panel, force_link_train);
  }
  
-@@ -740,6 +1052,146 @@ static int msm_dp_display_disable(struct msm_dp_display_private *dp,
+@@ -740,6 +1107,114 @@ static int msm_dp_display_disable(struct msm_dp_display_private *dp,
  	return 0;
  }
  
-+/*
-+ * Display Stream Compression over DP.
-+ *   0: never compress
-+ *   1: compress when the link cannot carry the mode uncompressed
-+ *   2: compress every mode the sink can decode
-+ */
-+/* Select compression from source/sink capabilities and the link budget. */
-+static int dp_dsc = 1;
-+module_param(dp_dsc, int, 0644);
-+MODULE_PARM_DESC(dp_dsc, "DP DSC: 0 off, 1 when the link needs it, 2 always");
-+
-+/* Bring-up limits for compressed modes; 0 leaves them unlimited */
-+static unsigned int dp_dsc_max_width;
-+module_param(dp_dsc_max_width, uint, 0644);
-+MODULE_PARM_DESC(dp_dsc_max_width, "DP DSC: widest compressed mode in pixels (0: unlimited)");
-+
-+static unsigned int dp_dsc_max_clock;
-+module_param(dp_dsc_max_clock, uint, 0644);
-+MODULE_PARM_DESC(dp_dsc_max_clock, "DP DSC: fastest compressed mode pixel clock in kHz (0: unlimited)");
-+
-+static unsigned int dp_dsc_min_slices;
-+module_param(dp_dsc_min_slices, uint, 0644);
-+MODULE_PARM_DESC(dp_dsc_min_slices, "DP DSC: slice count granularity override, e.g. 1 with dpu_dsc_single_pipe (0: from the topology)");
-+
 +/*
 + * Two DPU layer mixers of 2560 pixels feed one DisplayPort interface through
 + * the 3D merge block. Wider modes need four mixers, which the DPU combines
@@ -2027,18 +1875,12 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
 +{
 +	const struct msm_dp *msm_dp_display = &dp->msm_dp_display;
 +
-+	if (dp_dsc <= 0 || msm_dp_display->is_edp || !dp->panel->dsc_capable)
++	if (msm_dp_display->is_edp || !dp->panel->dsc_capable)
 +		return false;
 +
 +	/* Do not advertise DSC on a tunnel without a verified FEC contract. */
 +	if (msm_dp_aux_usb4_attached(dp->aux) &&
 +	    !msm_dp_aux_usb4_fec_supported(dp->aux))
-+		return false;
-+
-+	if (dp_dsc_max_width && mode->hdisplay > dp_dsc_max_width)
-+		return false;
-+
-+	if (dp_dsc_max_clock && mode->clock > dp_dsc_max_clock)
 +		return false;
 +
 +	/* the data throttle assumes the wide bus, two pixels per clock */
@@ -2100,7 +1942,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
 +	fits = mode_rate_khz <= link_rate_khz &&
 +	       mode->hdisplay <= DP_MAX_UNCOMPRESSED_WIDTH;
 +
-+	if (fits && dp_dsc != 2)
++	if (fits)
 +		return MODE_OK;
 +
 +	if (!msm_dp_display_dsc_allowed(dp, mode))
@@ -2111,8 +1953,6 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
 +	 * the mode is wider than two mixers; every encoder needs whole slices.
 +	 */
 +	min_slices = mode->hdisplay > 2 * DP_MIXER_WIDTH ? 4 : 2;
-+	if (dp_dsc_min_slices)
-+		min_slices = dp_dsc_min_slices;
 +
 +	if (msm_dp_panel_dsc_prepare(dp->panel, mode, min_slices, dsc, params))
 +		return fits ? MODE_OK : MODE_BAD;
@@ -2133,7 +1973,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  /**
   * msm_dp_display_mode_valid - callback to determine if specified mode is valid
   * @dp: Pointer to dp display structure
-@@ -751,50 +1203,91 @@ enum drm_mode_status msm_dp_display_mode_valid(struct msm_dp *dp,
+@@ -751,50 +1226,91 @@ enum drm_mode_status msm_dp_display_mode_valid(struct msm_dp *dp,
  					       const struct drm_display_info *info,
  					       const struct drm_display_mode *mode)
  {
@@ -2253,7 +2093,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  }
  
  int msm_dp_display_get_modes(struct msm_dp *dp)
-@@ -899,6 +1392,23 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
+@@ -899,6 +1415,23 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
  
  	priv = container_of(dp, struct msm_dp_display_private, msm_dp_display);
  
@@ -2277,7 +2117,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  	guard(mutex)(&priv->plugged_lock);
  	ret = pm_runtime_resume_and_get(&dp->pdev->dev);
  	if (ret) {
-@@ -906,9 +1416,19 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
+@@ -906,9 +1439,19 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
  		return status;
  	}
  
@@ -2298,7 +2138,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  
  	ret = msm_dp_aux_is_link_connected(priv->aux);
  	DRM_DEBUG_DP("aux link status: %x\n", ret);
-@@ -1216,6 +1736,13 @@ static int msm_dp_display_probe(struct platform_device *pdev)
+@@ -1216,6 +1759,13 @@ static int msm_dp_display_probe(struct platform_device *pdev)
  	dp->hpd_isr_status = 0;
  
  	mutex_init(&dp->plugged_lock);
@@ -2312,7 +2152,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  
  	rc = msm_dp_display_get_io(dp);
  	if (rc)
-@@ -1265,6 +1792,8 @@ static void msm_dp_display_remove(struct platform_device *pdev)
+@@ -1265,6 +1815,8 @@ static void msm_dp_display_remove(struct platform_device *pdev)
  {
  	struct msm_dp_display_private *dp = dev_get_dp_display_private(&pdev->dev);
  
@@ -2321,7 +2161,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  	component_del(&pdev->dev, &msm_dp_display_comp_ops);
  	msm_dp_display_deinit_sub_modules(dp);
  	platform_set_drvdata(pdev, NULL);
-@@ -1274,13 +1803,17 @@ static int msm_dp_pm_runtime_suspend(struct device *dev)
+@@ -1274,13 +1826,17 @@ static int msm_dp_pm_runtime_suspend(struct device *dev)
  {
  	struct msm_dp_display_private *dp = dev_get_dp_display_private(dev);
  
@@ -2339,7 +2179,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  
  	return 0;
  }
-@@ -1288,6 +1821,7 @@ static int msm_dp_pm_runtime_suspend(struct device *dev)
+@@ -1288,6 +1844,7 @@ static int msm_dp_pm_runtime_suspend(struct device *dev)
  static int msm_dp_pm_runtime_resume(struct device *dev)
  {
  	struct msm_dp_display_private *dp = dev_get_dp_display_private(dev);
@@ -2347,7 +2187,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  
  	/*
  	 * for eDP, host cotroller, HPD block and PHY are enabled here
-@@ -1297,10 +1831,17 @@ static int msm_dp_pm_runtime_resume(struct device *dev)
+@@ -1297,10 +1854,17 @@ static int msm_dp_pm_runtime_resume(struct device *dev)
  	 * HPD block is enabled at msm_dp_bridge_hpd_enable()
  	 * PHY will be enabled at plugin handler later
  	 */
@@ -2366,20 +2206,10 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  	}
  
  	enable_irq(dp->irq);
-@@ -1313,6 +1854,128 @@ static const struct dev_pm_ops msm_dp_pm_ops = {
+@@ -1313,6 +1877,42 @@ static const struct dev_pm_ops msm_dp_pm_ops = {
  				pm_runtime_force_resume)
  };
  
-+/*
-+ * USB4 DisplayPort tunneling bring-up hook (Surface Laptop 8 experiments):
-+ * "on [rate_khz] [lanes]" initializes the DP PHY in tunneled mode, runs the
-+ * link and DP IN clocks and points the MDSS DP IN mux at this controller;
-+ * "off" reverses it. The mux word lives in the MDSS top block; it is mapped
-+ * here directly because no Linux driver owns it yet.
-+ */
-+#define MSM_DP_USB4_DPIN_MUX_PA		0x0ae01464
-+#define MSM_DP_USB4_DPIN_MUX_MASK	0x3
-+
 +static int msm_dp_usb4_route_locked(struct device *dev, unsigned int resource)
 +{
 +	struct msm_dp_display_private *dp;
@@ -2407,103 +2237,19 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
 +
 +	if (!dev)
 +		return -EINVAL;
-+	dev_info(dev, "USB4 route: device lock enter\n");
++	dev_dbg(dev, "USB4 route: device lock enter\n");
 +	device_lock(dev);
-+	dev_info(dev, "USB4 route: device lock acquired\n");
++	dev_dbg(dev, "USB4 route: device lock acquired\n");
 +	ret = msm_dp_usb4_route_locked(dev, resource);
 +	device_unlock(dev);
 +	return ret;
 +}
 +EXPORT_SYMBOL_GPL(msm_dp_usb4_route);
 +
-+static ssize_t usb4_tunnel_store(struct device *dev, struct device_attribute *attr,
-+				 const char *buf, size_t count)
-+{
-+	struct msm_dp *msm_dp = dev_get_drvdata(dev);
-+	struct msm_dp_display_private *dp;
-+	unsigned int rate = 810000, lanes = 4, resource = 1;
-+	void __iomem *mux;
-+	char op[8];
-+	u32 val;
-+	int ret;
-+
-+	if (!msm_dp)
-+		return -ENODEV;
-+	dp = container_of(msm_dp, struct msm_dp_display_private, msm_dp_display);
-+	if (sscanf(buf, "%7s %u %u %u", op, &rate, &lanes, &resource) < 1)
-+		return -EINVAL;
-+	if (lanes < 1 || lanes > 4 || resource > MSM_DP_USB4_DPIN_MUX_MASK)
-+		return -EINVAL;
-+
-+	mux = ioremap(MSM_DP_USB4_DPIN_MUX_PA, 4);
-+	if (!mux)
-+		return -ENOMEM;
-+
-+	if (msm_dp_aux_usb4_attached(dp->aux)) {
-+		ret = -EBUSY;
-+		goto out;
-+	}
-+
-+	if (!strcmp(op, "on")) {
-+		ret = pm_runtime_resume_and_get(dev);
-+		if (ret)
-+			goto out;
-+		ret = msm_dp_display_host_phy_init(dp);
-+		if (ret < 0) {
-+			pm_runtime_put_sync(dev);
-+			goto out;
-+		}
-+		ret = msm_dp_ctrl_usb4_tunnel_prepare(dp->ctrl, true, rate, lanes);
-+		if (ret) {
-+			pm_runtime_put_sync(dev);
-+			goto out;
-+		}
-+		val = readl(mux);
-+		writel((val & ~MSM_DP_USB4_DPIN_MUX_MASK) | resource, mux);
-+		dp->usb4_manual_on = true;
-+		dev_info(dev, "USB4 tunnel on: DP IN mux %08x -> %08x\n", val, readl(mux));
-+	} else if (!strcmp(op, "off")) {
-+		val = readl(mux);
-+		writel(val & ~MSM_DP_USB4_DPIN_MUX_MASK, mux);
-+		ret = msm_dp_ctrl_usb4_tunnel_prepare(dp->ctrl, false, 0, 0);
-+		pm_runtime_put_sync(dev);
-+		dp->usb4_manual_on = false;
-+		dev_info(dev, "USB4 tunnel off: DP IN mux %08x -> %08x, ret %d\n", val,
-+			 readl(mux), ret);
-+	} else if (!strcmp(op, "mux")) {
-+		dev_info(dev, "DP IN mux %08x\n", readl(mux));
-+		ret = 0;
-+	} else if (!strcmp(op, "link")) {
-+		ret = msm_dp_ctrl_usb4_tunnel_link(dp->ctrl, true);
-+	} else if (!strcmp(op, "unlink")) {
-+		ret = msm_dp_ctrl_usb4_tunnel_link(dp->ctrl, false);
-+	} else {
-+		ret = -EINVAL;
-+	}
-+out:
-+	iounmap(mux);
-+	return ret ?: count;
-+}
-+static DEVICE_ATTR_WO(usb4_tunnel);
-+
-+static struct attribute *msm_dp_usb4_attrs[] = {
-+	&dev_attr_usb4_tunnel.attr,
-+	NULL,
-+};
-+ATTRIBUTE_GROUPS(msm_dp_usb4);
-+
  static struct platform_driver msm_dp_display_driver = {
  	.probe  = msm_dp_display_probe,
  	.remove = msm_dp_display_remove,
-@@ -1321,6 +1984,7 @@ static struct platform_driver msm_dp_display_driver = {
- 		.of_match_table = msm_dp_dt_match,
- 		.suppress_bind_attrs = true,
- 		.pm = &msm_dp_pm_ops,
-+		.dev_groups = msm_dp_usb4_groups,
- 	},
- };
- 
-@@ -1343,7 +2007,9 @@ void __exit msm_dp_unregister(void)
+@@ -1343,7 +1943,9 @@ void __exit msm_dp_unregister(void)
  bool msm_dp_needs_periph_flush(const struct msm_dp *msm_dp_display,
  			       const struct drm_display_mode *mode)
  {
@@ -2514,7 +2260,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  }
  
  bool msm_dp_wide_bus_available(const struct msm_dp *msm_dp_display)
-@@ -1433,6 +2099,10 @@ void msm_dp_display_atomic_enable(struct msm_dp *msm_dp_display,
+@@ -1433,6 +2035,10 @@ void msm_dp_display_atomic_enable(struct msm_dp *msm_dp_display,
  
  	dp = container_of(msm_dp_display, struct msm_dp_display_private, msm_dp_display);
  
@@ -2525,7 +2271,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  	rc = msm_dp_display_prepare_link(dp);
  	if (rc) {
  		DRM_ERROR("DP display prepare failed, rc=%d\n", rc);
-@@ -1440,8 +2110,10 @@ void msm_dp_display_atomic_enable(struct msm_dp *msm_dp_display,
+@@ -1440,8 +2046,10 @@ void msm_dp_display_atomic_enable(struct msm_dp *msm_dp_display,
  	}
  
  	rc = msm_dp_display_enable(dp, dp->panel);
@@ -2537,7 +2283,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  
  	rc = msm_dp_display_post_enable(msm_dp_display);
  	if (rc) {
-@@ -1479,7 +2151,10 @@ static void msm_dp_display_unprepare(struct msm_dp_display_private *dp)
+@@ -1479,7 +2087,10 @@ static void msm_dp_display_unprepare(struct msm_dp_display_private *dp)
  {
  	struct msm_dp *msm_dp_display = &dp->msm_dp_display;
  
@@ -2549,7 +2295,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  
  	drm_dbg_dp(dp->drm_dev, "type=%d Done\n", msm_dp_display->connector_type);
  }
-@@ -1498,6 +2173,7 @@ void msm_dp_display_atomic_post_disable(struct msm_dp *dp)
+@@ -1498,6 +2109,7 @@ void msm_dp_display_atomic_post_disable(struct msm_dp *dp)
  	msm_dp_display_disable(msm_dp_display, msm_dp_display->panel);
  
  	msm_dp_display_unprepare(msm_dp_display);
@@ -2557,7 +2303,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  }
  
  void msm_dp_bridge_hpd_enable(struct drm_bridge *bridge)
-@@ -1535,14 +2211,19 @@ void msm_dp_bridge_hpd_disable(struct drm_bridge *bridge)
+@@ -1535,14 +2147,19 @@ void msm_dp_bridge_hpd_disable(struct drm_bridge *bridge)
  	pm_runtime_put_sync(&msm_dp_display->pdev->dev);
  }
  
@@ -2583,7 +2329,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  
  	if (pm_runtime_resume_and_get(&msm_dp_display->pdev->dev)) {
  		DRM_ERROR("failed to pm_runtime_resume\n");
-@@ -1550,6 +2231,8 @@ void msm_dp_bridge_hpd_notify(struct drm_bridge *bridge,
+@@ -1550,6 +2167,8 @@ void msm_dp_bridge_hpd_notify(struct drm_bridge *bridge,
  	}
  
  	hpd_link_status = msm_dp_aux_is_link_connected(dp->aux);
@@ -2592,7 +2338,7 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
  
  	drm_dbg_dp(dp->drm_dev, "type=%d link hpd_link_status=0x%x, status=%d\n",
  		   msm_dp_display->connector_type, hpd_link_status, status);
-@@ -1568,4 +2251,44 @@ void msm_dp_bridge_hpd_notify(struct drm_bridge *bridge,
+@@ -1568,4 +2187,44 @@ void msm_dp_bridge_hpd_notify(struct drm_bridge *bridge,
  	}
  
  	pm_runtime_put_sync(&msm_dp_display->pdev->dev);
@@ -2638,10 +2384,10 @@ index 5d2ddf1808fe13ff71125c10795a2c4200a7fc7d..d7cc8bb4839dabc2d5c32bd35db4507e
 +	queue_work(system_long_wq, &dp->hpd_work);
  }
 diff --git a/drivers/gpu/drm/msm/dp/dp_panel.c b/drivers/gpu/drm/msm/dp/dp_panel.c
-index 832328e607876035d4928f682b1ec7a6c0f42946..2c4cc4ba4d641c5af8734ab90d70f133b613156a 100644
+index 832328e607876035d4928f682b1ec7a6c0f42946..4b7d5f1231de26db1dc6772bef022b105b043eeb 100644
 --- a/drivers/gpu/drm/msm/dp/dp_panel.c
 +++ b/drivers/gpu/drm/msm/dp/dp_panel.c
-@@ -8,12 +8,14 @@
+@@ -8,14 +8,15 @@
  #include "dp_utils.h"
  
  #include <linux/moduleparam.h>
@@ -2654,66 +2400,11 @@ index 832328e607876035d4928f682b1ec7a6c0f42946..2c4cc4ba4d641c5af8734ab90d70f133
  #include <linux/io.h>
 +#include <linux/math64.h>
  #include <linux/types.h>
- #include <asm/byteorder.h>
+-#include <asm/byteorder.h>
  
-@@ -27,6 +29,56 @@ static bool edp_force_max_link_rate;
- module_param(edp_force_max_link_rate, bool, 0444);
- MODULE_PARM_DESC(edp_force_max_link_rate, "eDP: train at DPCD MAX_LINK_RATE (ignore SUPPORTED_LINK_RATES and link-frequencies)");
+ #define DP_INTF_CONFIG_DATABUS_WIDEN     BIT(4)
  
-+/*
-+ * Bring-up knobs for the compressed stream.
-+ *   dp_dsc_4ppc: run the interface at four pixels per clock, as the vendor
-+ *   driver does on this generation (data throttle 2/3, pixel clock /4).
-+ *   dp_dsc_version_minor: force the DSC 1.1 (1) or 1.2 (2) rate-control
-+ *   tables and PPS version; 0 follows the sink.
-+ *   dp_dsc_pps_swap: pack the PPS words most significant byte first.
-+ */
-+static bool dp_dsc_4ppc;
-+module_param(dp_dsc_4ppc, bool, 0644);
-+MODULE_PARM_DESC(dp_dsc_4ppc, "DP DSC: four pixels per clock on the interface");
-+static unsigned int dp_dsc_version_minor;
-+module_param(dp_dsc_version_minor, uint, 0644);
-+MODULE_PARM_DESC(dp_dsc_version_minor, "DP DSC: force minor version 1 or 2 (0: sink)");
-+static bool dp_dsc_pps_swap;
-+module_param(dp_dsc_pps_swap, bool, 0644);
-+MODULE_PARM_DESC(dp_dsc_pps_swap, "DP DSC: pack PPS words big-endian");
-+static bool dp_dsc_sdp_update;
-+module_param(dp_dsc_sdp_update, bool, 0644);
-+MODULE_PARM_DESC(dp_dsc_sdp_update, "DP DSC: pulse the SDP update bit after writing the PPS");
-+static bool dp_dsc_pps_oneshot;
-+module_param(dp_dsc_pps_oneshot, bool, 0644);
-+MODULE_PARM_DESC(dp_dsc_pps_oneshot, "DP DSC: one-shot PPS flush instead of continuous");
-+static unsigned int dp_dsc_be_in_lane = 10;
-+module_param(dp_dsc_be_in_lane, uint, 0644);
-+MODULE_PARM_DESC(dp_dsc_be_in_lane, "DP DSC: byte-enable-in-lane field of the compression control");
-+static bool dp_dsc_bytes_total;
-+module_param(dp_dsc_bytes_total, bool, 0644);
-+MODULE_PARM_DESC(dp_dsc_bytes_total, "DP DSC: program bytes per line instead of bytes per slice");
-+static unsigned int dp_dsc_slice_height;
-+module_param(dp_dsc_slice_height, uint, 0644);
-+MODULE_PARM_DESC(dp_dsc_slice_height, "DP DSC: force the slice height when it divides the picture (0: automatic)");
-+
-+static unsigned int dp_dsc_slices;
-+module_param(dp_dsc_slices, uint, 0644);
-+MODULE_PARM_DESC(dp_dsc_slices, "DP DSC: force the slice count (0: automatic)");
-+static bool dp_dsc_pps_late;
-+module_param(dp_dsc_pps_late, bool, 0644);
-+MODULE_PARM_DESC(dp_dsc_pps_late, "DP DSC: write the PPS again after the video is running");
-+
-+bool msm_dp_panel_dsc_pps_late(void)
-+{
-+	return dp_dsc_pps_late;
-+}
-+
-+bool msm_dp_panel_dsc_4ppc(void)
-+{
-+	return dp_dsc_4ppc;
-+}
-+
- struct msm_dp_panel_private {
- 	struct device *dev;
- 	struct drm_device *drm_dev;
-@@ -94,6 +146,52 @@ static void msm_dp_panel_read_psr_cap(struct msm_dp_panel_private *panel)
+@@ -94,6 +95,52 @@ static void msm_dp_panel_read_psr_cap(struct msm_dp_panel_private *panel)
  	}
  }
  
@@ -2766,7 +2457,7 @@ index 832328e607876035d4928f682b1ec7a6c0f42946..2c4cc4ba4d641c5af8734ab90d70f133
  static int msm_dp_panel_read_dpcd(struct msm_dp_panel *msm_dp_panel, bool is_edp)
  {
  	int rc, max_lttpr_lanes, max_lttpr_rate;
-@@ -217,6 +315,7 @@ static int msm_dp_panel_read_dpcd(struct msm_dp_panel *msm_dp_panel, bool is_edp
+@@ -217,6 +264,7 @@ static int msm_dp_panel_read_dpcd(struct msm_dp_panel *msm_dp_panel, bool is_edp
  		link_info->capabilities |= DP_LINK_CAP_ENHANCED_FRAMING;
  
  	msm_dp_panel_read_psr_cap(panel);
@@ -2774,7 +2465,7 @@ index 832328e607876035d4928f682b1ec7a6c0f42946..2c4cc4ba4d641c5af8734ab90d70f133
  
  	return rc;
  }
-@@ -453,6 +552,439 @@ void msm_dp_panel_clear_dsc_dto(struct msm_dp_panel *msm_dp_panel)
+@@ -453,6 +501,410 @@ void msm_dp_panel_clear_dsc_dto(struct msm_dp_panel *msm_dp_panel)
  	msm_dp_write_p0(panel, MMSS_DP_DSC_DTO, 0x0);
  }
  
@@ -2855,11 +2546,6 @@ index 832328e607876035d4928f682b1ec7a6c0f42946..2c4cc4ba4d641c5af8734ab90d70f133
 +	params->dto_n = 1;
 +	params->dto_d = 3;
 +	params->pclk_factor = 2;
-+	if (dp_dsc_4ppc) {
-+		/* four pixels per clock: two data clocks in three */
-+		params->dto_n = 2;
-+		params->pclk_factor = 4;
-+	}
 +
 +	/*
 +	 * The interface runs in wide bus mode, moving 6 compressed bytes per
@@ -2904,8 +2590,6 @@ index 832328e607876035d4928f682b1ec7a6c0f42946..2c4cc4ba4d641c5af8734ab90d70f133
 +
 +	version = dsc_dpcd[DP_DSC_REV - DP_DSC_SUPPORT];
 +	minor = version >> 4;
-+	if (dp_dsc_version_minor && dp_dsc_version_minor <= minor)
-+		minor = dp_dsc_version_minor;
 +	if ((version & 0xf) != 1 || (minor != 1 && minor != 2)) {
 +		drm_dbg_dp(panel->drm_dev, "unsupported sink DSC version 0x%02x\n",
 +			   version);
@@ -2933,14 +2617,10 @@ index 832328e607876035d4928f682b1ec7a6c0f42946..2c4cc4ba4d641c5af8734ab90d70f133
 +		if (ppr > msm_dp_dsc_slice_tbl[i].min_ppr &&
 +		    ppr <= msm_dp_dsc_slice_tbl[i].max_ppr)
 +			break;
-+	if (dp_dsc_slices)
-+		i = 0;
 +
 +	for (; i < ARRAY_SIZE(msm_dp_dsc_slice_tbl); i++) {
 +		slices = msm_dp_dsc_slice_tbl[i].num_slices;
 +
-+		if (dp_dsc_slices && slices != dp_dsc_slices)
-+			continue;
 +		if (slices < min_slices || slices % min_slices)
 +			continue;
 +		if (mode->hdisplay % slices)
@@ -2971,9 +2651,7 @@ index 832328e607876035d4928f682b1ec7a6c0f42946..2c4cc4ba4d641c5af8734ab90d70f133
 +	dsc->slice_width = slice_width;
 +	dsc->slice_count = slices;
 +
-+	if (dp_dsc_slice_height && dsc->pic_height % dp_dsc_slice_height == 0)
-+		dsc->slice_height = dp_dsc_slice_height;
-+	else if (dsc->pic_height % 108 == 0)
++	if (dsc->pic_height % 108 == 0)
 +		dsc->slice_height = 108;
 +	else if (dsc->pic_height % 16 == 0)
 +		dsc->slice_height = 16;
@@ -3069,12 +2747,8 @@ index 832328e607876035d4928f682b1ec7a6c0f42946..2c4cc4ba4d641c5af8734ab90d70f133
 +	drm_dsc_pps_payload_pack(&pps, dsc);
 +
 +	for (i = 0; i < MSM_DP_PPS_WORDS; i++) {
-+		if (dp_dsc_pps_swap)
-+			words[i] = bytes[4 * i] << 24 | bytes[4 * i + 1] << 16 |
-+				   bytes[4 * i + 2] << 8 | bytes[4 * i + 3];
-+		else
-+			words[i] = bytes[4 * i] | bytes[4 * i + 1] << 8 |
-+				   bytes[4 * i + 2] << 16 | bytes[4 * i + 3] << 24;
++		words[i] = bytes[4 * i] | bytes[4 * i + 1] << 8 |
++			   bytes[4 * i + 2] << 16 | bytes[4 * i + 3] << 24;
 +		parity[i] = msm_dp_utils_calculate_parity32(words[i]);
 +	}
 +
@@ -3117,10 +2791,7 @@ index 832328e607876035d4928f682b1ec7a6c0f42946..2c4cc4ba4d641c5af8734ab90d70f133
 +		return;
 +
 +	reg = msm_dp_read_link(panel, MMSS_DP_FLUSH);
-+	if (dp_dsc_pps_oneshot)
-+		reg |= DP_FLUSH_PPS_ONESHOT;
-+	else
-+		reg &= ~DP_FLUSH_PPS_ONESHOT;
++	reg &= ~DP_FLUSH_PPS_ONESHOT;
 +	reg |= DP_FLUSH_PPS;
 +	msm_dp_write_link(panel, MMSS_DP_FLUSH, reg);
 +}
@@ -3183,26 +2854,17 @@ index 832328e607876035d4928f682b1ec7a6c0f42946..2c4cc4ba4d641c5af8734ab90d70f133
 +	compression = DP_COMPRESSION_MODE_CTRL_EN |
 +	      params->eol_byte_num << DP_COMPRESSION_MODE_CTRL_EOL_BYTE_NUM_SHIFT |
 +	      (params->slice_per_pkt - 1) << DP_COMPRESSION_MODE_CTRL_SLICE_PER_PKT_SHIFT |
-+	      (dp_dsc_be_in_lane & 0xf) << DP_COMPRESSION_MODE_CTRL_BE_IN_LANE_SHIFT |
-+	      (dp_dsc_bytes_total ? params->bytes_per_pkt * params->slice_per_pkt : params->bytes_per_pkt)
-+		<< DP_COMPRESSION_MODE_CTRL_BYTES_PER_PKT_SHIFT;
++	      10 << DP_COMPRESSION_MODE_CTRL_BE_IN_LANE_SHIFT |
++	      params->bytes_per_pkt << DP_COMPRESSION_MODE_CTRL_BYTES_PER_PKT_SHIFT;
 +	msm_dp_write_link(panel, REG_DP_COMPRESSION_MODE_CTRL, compression);
 +
 +	/* send the PPS with every frame */
 +	reg = msm_dp_read_link(panel, MMSS_DP_FLUSH);
-+	if (dp_dsc_pps_oneshot)
-+		reg |= DP_FLUSH_PPS_ONESHOT;
-+	else
-+		reg &= ~DP_FLUSH_PPS_ONESHOT;
++	reg &= ~DP_FLUSH_PPS_ONESHOT;
 +	reg |= DP_FLUSH_PPS;
 +	msm_dp_write_link(panel, MMSS_DP_FLUSH, reg);
 +
-+	if (dp_dsc_sdp_update) {
-+		msm_dp_write_link(panel, MMSS_DP_SDP_CFG3, UPDATE_SDP);
-+		msm_dp_write_link(panel, MMSS_DP_SDP_CFG3, 0x0);
-+	} else {
-+		msm_dp_panel_update_sdp(panel);
-+	}
++	msm_dp_panel_update_sdp(panel);
 +
 +	drm_dbg_dp(panel->drm_dev, "dsc: dto=0x%x count=%u compression=0x%x flush=0x%x\n",
 +		   (u32)(DP_DSC_DTO_EN | DP_DSC_DTO_ENABLE_HW_ACK |
@@ -3215,7 +2877,7 @@ index 832328e607876035d4928f682b1ec7a6c0f42946..2c4cc4ba4d641c5af8734ab90d70f133
  {
  	u32 header[2];
 diff --git a/drivers/gpu/drm/msm/dp/dp_panel.h b/drivers/gpu/drm/msm/dp/dp_panel.h
-index 4519ac37422064dab8e573fdbe958443f35afec9..acd18c12ac93520455ea5a4b8f64d6388b0ab7db 100644
+index 4519ac37422064dab8e573fdbe958443f35afec9..2f2c0e6627a53671eafa464c88e4c67f141e8402 100644
 --- a/drivers/gpu/drm/msm/dp/dp_panel.h
 +++ b/drivers/gpu/drm/msm/dp/dp_panel.h
 @@ -8,15 +8,36 @@
@@ -3267,7 +2929,7 @@ index 4519ac37422064dab8e573fdbe958443f35afec9..acd18c12ac93520455ea5a4b8f64d638
  
  	struct msm_dp_link_info link_info;
  	struct drm_connector *connector;
-@@ -56,6 +82,24 @@ void msm_dp_panel_handle_sink_request(struct msm_dp_panel *msm_dp_panel,
+@@ -56,6 +82,22 @@ void msm_dp_panel_handle_sink_request(struct msm_dp_panel *msm_dp_panel,
  				      const struct drm_edid *drm_edid);
  void msm_dp_panel_tpg_config(struct msm_dp_panel *msm_dp_panel, bool enable);
  
@@ -3275,8 +2937,6 @@ index 4519ac37422064dab8e573fdbe958443f35afec9..acd18c12ac93520455ea5a4b8f64d638
 +#define MSM_DP_DSC_SRC_BPP	24
 +#define MSM_DP_DSC_TGT_BPP	8
 +
-+bool msm_dp_panel_dsc_4ppc(void);
-+bool msm_dp_panel_dsc_pps_late(void);
 +int msm_dp_panel_dsc_prepare(struct msm_dp_panel *msm_dp_panel,
 +			     const struct drm_display_mode *mode,
 +			     unsigned int min_slices,

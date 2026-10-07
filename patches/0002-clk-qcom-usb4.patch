@@ -1,10 +1,10 @@
-Subject: [REVIEW 02/09] Qualcomm USB4 clocks and reset error handling
+Subject: [REVIEW 02/16] Qualcomm USB4 clocks, reset errors and USB power domain retention
 
-Add Glymur router clock/mux operations, propagate reset errors, and expose the DP input link clock. Review register ownership, bounded polling and error unwinding.
+Add Glymur router clock/mux operations, propagate reset errors, and expose the DP input link clock. Keep the ten Glymur USB controller and PHY power domains in retention (PWRSTS_RET_ON), as X1E and SC8280XP do: with them allowed to switch off, the front-port controller faulted and died after resume. The USB4 router domains are unchanged. Review register ownership, bounded polling and error unwinding.
 
-Dependencies: Base prerequisites. Used by patches 05 and 07.
+Dependencies: Base prerequisites. Used by patches 05, 07, 11 and 16.
 
-Source attribution: Local Surface integration; provenance/usb4/05-glymur-p2rr2p-mux.diff, 06-glymur-rx-mux.diff and 20-clk-qcom-reset-propagate-errors.patch; remaining changes are recorded in provenance/derivation.json.
+Source attribution: Local Surface integration; provenance/usb4/05-glymur-p2rr2p-mux.diff, 06-glymur-rx-mux.diff and 20-clk-qcom-reset-propagate-errors.patch; remaining changes, including the retention change from Surface candidate 1.90, are recorded in provenance/derivation.json.
 
 This is a review grouping of preserved source, not a new authorship claim or
 an independently build-validated upstream commit. Original attribution remains
@@ -26,7 +26,7 @@ index 32cc5226b4de70e3e36d1df9a1cac649ca013397..2a9c4ae37d4ca5718967df7d9de3ea11
  };
  
 diff --git a/drivers/clk/qcom/gcc-glymur.c b/drivers/clk/qcom/gcc-glymur.c
-index 2ee4820b6fdfb1ad2cdb15366cf746651fc1a36a..96dd570b14de90c591684cb61284e8ea247b7de5 100644
+index 2ee4820b6fdfb1ad2cdb15366cf746651fc1a36a..b5a9036594fedc0f62118e204bb6393bff7fb287 100644
 --- a/drivers/clk/qcom/gcc-glymur.c
 +++ b/drivers/clk/qcom/gcc-glymur.c
 @@ -7,6 +7,7 @@
@@ -340,6 +340,96 @@ index 2ee4820b6fdfb1ad2cdb15366cf746651fc1a36a..96dd570b14de90c591684cb61284e8ea
  		},
  	},
  };
+@@ -7785,7 +7651,7 @@ static struct gdsc gcc_usb20_prim_gdsc = {
+ 	.pd = {
+ 		.name = "gcc_usb20_prim_gdsc",
+ 	},
+-	.pwrsts = PWRSTS_OFF_ON,
++	.pwrsts = PWRSTS_RET_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,
+ };
+ 
+@@ -7797,7 +7663,7 @@ static struct gdsc gcc_usb30_mp_gdsc = {
+ 	.pd = {
+ 		.name = "gcc_usb30_mp_gdsc",
+ 	},
+-	.pwrsts = PWRSTS_OFF_ON,
++	.pwrsts = PWRSTS_RET_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,
+ };
+ 
+@@ -7809,7 +7675,7 @@ static struct gdsc gcc_usb30_prim_gdsc = {
+ 	.pd = {
+ 		.name = "gcc_usb30_prim_gdsc",
+ 	},
+-	.pwrsts = PWRSTS_OFF_ON,
++	.pwrsts = PWRSTS_RET_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,
+ };
+ 
+@@ -7821,7 +7687,7 @@ static struct gdsc gcc_usb30_sec_gdsc = {
+ 	.pd = {
+ 		.name = "gcc_usb30_sec_gdsc",
+ 	},
+-	.pwrsts = PWRSTS_OFF_ON,
++	.pwrsts = PWRSTS_RET_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,
+ };
+ 
+@@ -7833,7 +7699,7 @@ static struct gdsc gcc_usb30_tert_gdsc = {
+ 	.pd = {
+ 		.name = "gcc_usb30_tert_gdsc",
+ 	},
+-	.pwrsts = PWRSTS_OFF_ON,
++	.pwrsts = PWRSTS_RET_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,
+ };
+ 
+@@ -7845,7 +7711,7 @@ static struct gdsc gcc_usb3_mp_ss0_phy_gdsc = {
+ 	.pd = {
+ 		.name = "gcc_usb3_mp_ss0_phy_gdsc",
+ 	},
+-	.pwrsts = PWRSTS_OFF_ON,
++	.pwrsts = PWRSTS_RET_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,
+ };
+ 
+@@ -7857,7 +7723,7 @@ static struct gdsc gcc_usb3_mp_ss1_phy_gdsc = {
+ 	.pd = {
+ 		.name = "gcc_usb3_mp_ss1_phy_gdsc",
+ 	},
+-	.pwrsts = PWRSTS_OFF_ON,
++	.pwrsts = PWRSTS_RET_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,
+ };
+ 
+@@ -7905,7 +7771,7 @@ static struct gdsc gcc_usb_0_phy_gdsc = {
+ 	.pd = {
+ 		.name = "gcc_usb_0_phy_gdsc",
+ 	},
+-	.pwrsts = PWRSTS_OFF_ON,
++	.pwrsts = PWRSTS_RET_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,
+ };
+ 
+@@ -7917,7 +7783,7 @@ static struct gdsc gcc_usb_1_phy_gdsc = {
+ 	.pd = {
+ 		.name = "gcc_usb_1_phy_gdsc",
+ 	},
+-	.pwrsts = PWRSTS_OFF_ON,
++	.pwrsts = PWRSTS_RET_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,
+ };
+ 
+@@ -7929,7 +7795,7 @@ static struct gdsc gcc_usb_2_phy_gdsc = {
+ 	.pd = {
+ 		.name = "gcc_usb_2_phy_gdsc",
+ 	},
+-	.pwrsts = PWRSTS_OFF_ON,
++	.pwrsts = PWRSTS_RET_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,
+ };
+ 
 @@ -8476,6 +8342,11 @@ static const struct qcom_reset_map gcc_glymur_resets[] = {
  	[GCC_VIDEO_AXI1_CLK_ARES] = { 0x32044, 2 },
  	[GCC_VIDEO_BCR] = { 0x32000 },

@@ -1,8 +1,8 @@
-Subject: [REVIEW 03/09] Shared Thunderbolt host transport and lifecycle
+Subject: [REVIEW 03/16] Shared Thunderbolt host transport and lifecycle
 
-Separate shared NHI/ring handling from PCI transport, extend host callbacks, and carry the router discovery/teardown changes. This patch also carries the Qualcomm glue that lives in shared files: platform driver registration in nhi.c and the DP resource retry hook in tb.c, both guarded by CONFIG_USB4_QCOM. Review effects on existing PCI controllers, DMA ownership and interrupt synchronization.
+Separate shared NHI/ring handling from PCI transport, extend host callbacks, and carry the shared teardown changes. This patch also carries the Qualcomm platform driver registration in pci.c (declared in nhi.h), guarded by CONFIG_USB4_QCOM. Review effects on existing PCI controllers, DMA ownership and interrupt synchronization. Since 1.122 the series no longer changes tb.c, tb.h or usb4.c here: the DP resource retry hook and the bring-up diagnostics in them are removed. Patch 12 changes tb.c for a separate resume problem.
 
-Dependencies: Base prerequisites for the shared transport. Required by patch 05. The CONFIG_USB4_QCOM-guarded code references qcom_usb4_host_driver, qcom_usb4_dp_driver and the router frontend defined in patch 05, so the tested configuration needs 05 to link.
+Dependencies: Base prerequisites for the shared transport. Required by patch 05. The CONFIG_USB4_QCOM-guarded registration references qcom_usb4_host_driver and qcom_usb4_dp_driver, defined in patch 05, so the tested configuration needs 05 to link.
 
 Source attribution: Local Surface integration; original decomposition in provenance/usb4/10-thunderbolt-share-nhi-teardown.patch through 19-thunderbolt-document-shared-ring-interrupt-ownership.patch; later changes recorded in provenance/derivation.json.
 
@@ -448,134 +448,6 @@ index 99333729f3c2ac6f6d00fd00fc1e22173fa75c71..e5439aa2f7a2d1c298e8c9c14d7e14a8
  	pci_unregister_driver(&nhi_driver);
  	tb_domain_exit();
  }
-diff --git a/drivers/thunderbolt/tb.c b/drivers/thunderbolt/tb.c
-index 47753a5c0f2ebde1dd4701b3b54e35561bdf0364..dbf8752ba701d606d1dbf2217668e812bf0a1748 100644
---- a/drivers/thunderbolt/tb.c
-+++ b/drivers/thunderbolt/tb.c
-@@ -108,6 +108,8 @@ static void tb_queue_hotplug(struct tb *tb, u64 route, u8 port, bool unplug)
- 
- /* enumeration & hot plug handling */
- 
-+static void tb_tunnel_dp(struct tb *tb);
-+
- static void tb_add_dp_resources(struct tb_switch *sw)
- {
- 	struct tb_cm *tcm = tb_priv(sw->tb);
-@@ -117,8 +119,21 @@ static void tb_add_dp_resources(struct tb_switch *sw)
- 		if (!tb_port_is_dpin(port))
- 			continue;
- 
--		if (!tb_switch_query_dp_resource(sw, port))
--			continue;
-+		if (!tb_switch_query_dp_resource(sw, port)) {
-+			int ret;
-+
-+			/*
-+			 * Bring-up probe: the Qualcomm host router reports its DP IN
-+			 * adapters unavailable at start; record the raw result and
-+			 * try an explicit allocation once so the firmware contract
-+			 * shows up in the log.
-+			 */
-+			ret = tb_switch_alloc_dp_resource(sw, port);
-+			tb_port_info(port, "DP IN resource not available at start; explicit alloc: %d\n", ret);
-+			if (ret)
-+				continue;
-+			tb_port_info(port, "DP IN resource allocated explicitly\n");
-+		}
- 
- 		/*
- 		 * If DP IN on device router exist, position it at the
-@@ -135,6 +150,54 @@ static void tb_add_dp_resources(struct tb_switch *sw)
- 	}
- }
- 
-+#if IS_ENABLED(CONFIG_USB4_QCOM)
-+/*
-+ * Bring-up hook for the Qualcomm host router: after the platform driver has
-+ * talked to the router firmware, re-run DP IN resource discovery for the
-+ * host router and retry DP tunneling without a domain restart.
-+ */
-+void tb_qcom_retry_dp_resources(struct tb *tb)
-+{
-+	struct tb_cm *tcm = tb_priv(tb);
-+	struct tb_switch *sw = tb->root_switch;
-+	struct tb_port *port;
-+	int ret;
-+
-+	mutex_lock(&tb->lock);
-+	if (!sw)
-+		goto out;
-+	tb_switch_for_each_port(sw, port) {
-+		struct tb_port *listed;
-+		bool present = false;
-+
-+		if (!tb_port_is_dpin(port))
-+			continue;
-+		list_for_each_entry(listed, &tcm->dp_resources, list) {
-+			if (listed == port) {
-+				present = true;
-+				break;
-+			}
-+		}
-+		if (present) {
-+			tb_port_info(port, "DP IN resource already listed\n");
-+			continue;
-+		}
-+		if (tb_switch_query_dp_resource(sw, port)) {
-+			tb_port_info(port, "DP IN resource now available\n");
-+		} else {
-+			ret = tb_switch_alloc_dp_resource(sw, port);
-+			tb_port_info(port, "DP IN resource explicit alloc on retry: %d\n", ret);
-+			if (ret)
-+				continue;
-+		}
-+		list_add_tail(&port->list, &tcm->dp_resources);
-+	}
-+	tb_tunnel_dp(tb);
-+out:
-+	mutex_unlock(&tb->lock);
-+}
-+#endif
-+
- static void tb_remove_dp_resources(struct tb_switch *sw)
- {
- 	struct tb_cm *tcm = tb_priv(sw->tb);
-diff --git a/drivers/thunderbolt/tb.h b/drivers/thunderbolt/tb.h
-index 4373336d9425e379fcc0fc551deee9e2e2ca5c13..72f3ce47e8e03f0f8e91f10f7f6c00efba06549b 100644
---- a/drivers/thunderbolt/tb.h
-+++ b/drivers/thunderbolt/tb.h
-@@ -1030,6 +1030,9 @@ int tb_switch_configure_link(struct tb_switch *sw);
- void tb_switch_unconfigure_link(struct tb_switch *sw);
- 
- bool tb_switch_query_dp_resource(struct tb_switch *sw, struct tb_port *in);
-+#if IS_ENABLED(CONFIG_USB4_QCOM)
-+void tb_qcom_retry_dp_resources(struct tb *tb);
-+#endif
- int tb_switch_alloc_dp_resource(struct tb_switch *sw, struct tb_port *in);
- void tb_switch_dealloc_dp_resource(struct tb_switch *sw, struct tb_port *in);
- 
-diff --git a/drivers/thunderbolt/usb4.c b/drivers/thunderbolt/usb4.c
-index 5fd4fe070f25844c28a4ba7fda149edfc2014c3a..c4096e1f8b75e2135eac693816d26035a9e8f94d 100644
---- a/drivers/thunderbolt/usb4.c
-+++ b/drivers/thunderbolt/usb4.c
-@@ -905,6 +905,8 @@ bool usb4_switch_query_dp_resource(struct tb_switch *sw, struct tb_port *in)
- 
- 	ret = usb4_switch_op(sw, USB4_SWITCH_OP_QUERY_DP_RESOURCE, &metadata,
- 			     &status);
-+	tb_port_info(in, "QUERY_DP_RESOURCE: ret %d status %u metadata %#x\n",
-+		     ret, ret ? 0 : status, metadata);
- 	/*
- 	 * If DP resource allocation is not supported assume it is
- 	 * always available.
-@@ -938,6 +940,8 @@ int usb4_switch_alloc_dp_resource(struct tb_switch *sw, struct tb_port *in)
- 
- 	ret = usb4_switch_op(sw, USB4_SWITCH_OP_ALLOC_DP_RESOURCE, &metadata,
- 			     &status);
-+	tb_port_info(in, "ALLOC_DP_RESOURCE: ret %d status %u metadata %#x\n",
-+		     ret, status, metadata);
- 	if (ret == -EOPNOTSUPP)
- 		return 0;
- 	if (ret)
 diff --git a/include/linux/thunderbolt.h b/include/linux/thunderbolt.h
 index d48623fda79ba43fe1c90d3e37e2cccf43e620ea..a955609c5449411979c7bc83e4144386838b8915 100644
 --- a/include/linux/thunderbolt.h

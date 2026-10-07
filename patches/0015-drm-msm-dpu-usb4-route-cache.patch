@@ -1,0 +1,44 @@
+Subject: [REVIEW 15/16] DPU: cache the USB4 DisplayPort route while the DPU is not active
+
+dpu_kms_set_usb4_dp_route() resumed the DPU to program the DP input route. In the late system-sleep phase runtime PM is disabled, so that resume failed (-EACCES), the DP release at sleep failed and no DP tunnel could be allocated after wake. The route is now programmed only when the DPU is runtime-active and otherwise cached; the DPU runtime resume already restores the cached route. A race with a concurrent runtime resume, present before this change, is not addressed.
+
+Dependencies: Patch 06 (same file). Used by patch 16.
+
+Source attribution: Local Surface change (candidate 1.137, kept in the 1.142 implementation).
+
+This is a review grouping of preserved source, not a new authorship claim or
+an independently build-validated upstream commit. Original attribution remains
+in the referenced provenance files. No new Signed-off-by trailers are added.
+
+---
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+index 0cfb38d364b22000949076bc26cb0ef2422762fc..8288b327e61298a19660bbf11164a81ff7dc47fd 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+@@ -1089,16 +1089,20 @@ static int dpu_kms_set_usb4_dp_route(struct msm_kms *kms, unsigned int resource)
+ 	    !dpu_kms->hw_mdp)
+ 		return -EOPNOTSUPP;
+ 
+-	/* Resume before locking: the resume callback restores the cached route. */
+-	ret = pm_runtime_resume_and_get(dev);
+-	if (ret < 0)
+-		return ret;
++	/*
++	 * Only program an active DPU. Otherwise (runtime suspended, or runtime
++	 * PM disabled during system sleep) cache the route: the resume
++	 * callback restores it.
++	 */
++	ret = pm_runtime_get_if_active(dev);
+ 	mutex_lock(&dpu_kms->usb4_route_lock);
+ 	dpu_kms->usb4_dp_route = resource;
+ 	dpu_kms->usb4_dp_route_valid = true;
+-	dpu_hw_setup_usb4_dp_route(dpu_kms->hw_mdp, resource);
++	if (ret > 0)
++		dpu_hw_setup_usb4_dp_route(dpu_kms->hw_mdp, resource);
+ 	mutex_unlock(&dpu_kms->usb4_route_lock);
+-	pm_runtime_put_sync(dev);
++	if (ret > 0)
++		pm_runtime_put(dev);
+ 	return 0;
+ }
+ 

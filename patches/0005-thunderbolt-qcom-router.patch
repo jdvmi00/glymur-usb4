@@ -1,6 +1,6 @@
-Subject: [REVIEW 05/09] Qualcomm router and DisplayPort provider
+Subject: [REVIEW 05/16] Qualcomm router and DisplayPort provider
 
-Add the Glymur router frontend, firmware/MCU control, NHI transport, startup, events, Type-C handling and DP provider. Review probe failures, release/restart, asynchronous work and the public display contract. The router runs only while a USB4 or Thunderbolt partner is attached; other USB-C partners use the port natively.
+Add the Glymur router frontend, firmware/MCU control, NHI transport, startup, events, Type-C handling and DP provider. Review probe failures, release/restart, asynchronous work and the public display contract. The router runs only while a USB4 or Thunderbolt partner is attached; other USB-C partners use the port natively. It is powered (runtime PM reference, interconnect votes and clocks) only while it runs, starts runtime-active so the idle after probe drops its power domain and CX vote, and releases its block reset before the domain goes off. Around system sleep a PM notifier saves the display state, disconnects the partner and stops the router, then restarts it and restores the display afterwards; patch 16 keeps a connected router across s2idle instead, and hibernation keeps this path. The bring-up mailbox, register, DP resource and manual DP controls, the experiment module parameters and the temporary status views are removed; routine tracing is debug output.
 
 Dependencies: Patches 01-04; patches 06-07 complete the coupled display integration. Apply the complete series before building.
 
@@ -47,7 +47,7 @@ index beb054c3126b1445d26b4c14de039d23367a5100..d1ef6906cf5d86e0e9d891d5450651af
 +	qcom-usb4-events.o qcom-usb4-host.o qcom-usb4-dp.o qcom-usb4-dp-link.o
 diff --git a/drivers/thunderbolt/qcom-usb4-dp-link.c b/drivers/thunderbolt/qcom-usb4-dp-link.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..f691a42a8756285e34b48efc3bea4d49fc5fe7ce
+index 0000000000000000000000000000000000000000..51ccde19b23fd801f6e40c06ee511b892c1ae417
 --- /dev/null
 +++ b/drivers/thunderbolt/qcom-usb4-dp-link.c
 @@ -0,0 +1,245 @@
@@ -292,8 +292,8 @@ index 0000000000000000000000000000000000000000..f691a42a8756285e34b48efc3bea4d49
 +		return ret;
 +	}
 +	writel(BIT(3), router + DP_ACK);
-+	pr_info("qcom-usb4-dp: receiver trained and clock sync complete at %u kHz, %u lanes\n",
-+		rate_khz, lanes);
++	pr_debug("qcom-usb4-dp: receiver trained and clock sync complete at %u kHz, %u lanes\n",
++		 rate_khz, lanes);
 +	return 0;
 +}
 diff --git a/drivers/thunderbolt/qcom-usb4-dp-link.h b/drivers/thunderbolt/qcom-usb4-dp-link.h
@@ -324,10 +324,10 @@ index 0000000000000000000000000000000000000000..44c33bed8354dfb314e331fb7f7e0377
 +#endif
 diff --git a/drivers/thunderbolt/qcom-usb4-dp.c b/drivers/thunderbolt/qcom-usb4-dp.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4b4be71fc
+index 0000000000000000000000000000000000000000..01298f6f9124648abe7b5202d517c3d7c1138050
 --- /dev/null
 +++ b/drivers/thunderbolt/qcom-usb4-dp.c
-@@ -0,0 +1,894 @@
+@@ -0,0 +1,928 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Surface Laptop 8 router 0 / DP IN 0 experimental display owner.
@@ -353,6 +353,7 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +#include <linux/slab.h>
 +#include <linux/soc/qcom/usb4-dp.h>
 +#include <linux/unaligned.h>
++#include <linux/wait.h>
 +#include <linux/workqueue.h>
 +
 +#include <drm/display/drm_dp_helper.h>
@@ -390,11 +391,15 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +#define DP_MAILBOX_POLL_MS	2
 +#define DP_CAPS_POLL_MS		20
 +#define DP_CAPS_MAX_POLLS	500
++#define DP_SLEEP_READY_MS	15000
 +
 +struct qcom_usb4_dp {
 +	struct device *dev;
 +	void __iomem *router;
 +	struct device *display;
++	/* Retained across stop/reprobe until the saved display state is restored. */
++	struct device *sleep_display;
++	wait_queue_head_t ready_wait;
 +	struct platform_device *child;
 +	struct work_struct link_work;
 +	bool connected;
@@ -414,9 +419,6 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +	bool release_failed;
 +	bool runtime_held;
 +	unsigned int caps_polls;
-+	unsigned int messages;
-+	bool fec_trace;
-+	unsigned int fec_trace_events;
 +};
 +
 +static void __iomem *dp_base(struct qcom_usb4_dp *dp, unsigned int adapter)
@@ -473,15 +475,6 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +	for (i = 0; i < *count; i += 4)
 +		put_unaligned_le32(readl(base + DP_FIFO_RX_DATA + i), payload + i);
 +consume:
-+	if (dp->fec_trace && dp->fec_trace_events < 64) {
-+		dp->fec_trace_events++;
-+		if (!ret)
-+			dev_info(dp->dev, "FEC trace RX type=%u data=%*ph\n",
-+				 *type, *count, payload);
-+		else
-+			dev_info(dp->dev, "FEC trace RX error=%d header=%#x status=%#x\n",
-+				 ret, header, status);
-+	}
 +	/* Complete the payload reads before releasing the receive slot. */
 +	mb();
 +	writel(1, base + DP_FIFO_RX_CONSUME);
@@ -520,11 +513,6 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +	if (count > sizeof(padded))
 +		return -EINVAL;
 +	memcpy(padded, payload, count);
-+	if (dp->fec_trace && dp->fec_trace_events < 64) {
-+		dp->fec_trace_events++;
-+		dev_info(dp->dev, "FEC trace TX type=%u data=%*ph\n",
-+			 type, count, payload);
-+	}
 +	writel(DP_IRQ_TX_DONE | DP_IRQ_RX_READY, base + DP_IRQ_CLEAR);
 +	for (i = 0; i < sizeof(padded); i += 4)
 +		writel(get_unaligned_le32(padded + i), base + DP_FIFO_TX_DATA + i);
@@ -658,9 +646,6 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +	ret = dp_fifo_drain(dp);
 +	if (ret)
 +		goto fault;
-+	/* Diagnostic capture only: preserve AUX/control handling unchanged. */
-+	if (request == DP_AUX_NATIVE_WRITE && msg->address == DP_FEC_CONFIGURATION)
-+		dp->fec_trace = true;
 +	ret = dp_fifo_tx(dp, DP_PACKET_AUX, tx, tx_count);
 +	if (ret)
 +		goto fault;
@@ -748,7 +733,9 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +	 */
 +	ret = dp_dpsw(dp, 5);
 +	if (ret)
-+		dev_warn(dp->dev, "DP discovery command failed (%d); mailbox service retained, inspect usb4_dp before retrying discover\n", ret);
++		dev_warn(dp->dev,
++			 "DP discovery command failed (%d); mailbox service retained\n",
++			 ret);
 +	return ret;
 +}
 +
@@ -793,8 +780,8 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +		return ret;
 +	if (status & (DP_FEC_DECODE_EN_DETECTED | DP_FEC_DECODE_DIS_DETECTED))
 +		return -EIO;
-+	dev_info(dp->dev, "USB4 FEC readiness prepared: ready=%#x status=%#x\n",
-+		 ready, status);
++	dev_dbg(dp->dev, "USB4 FEC readiness prepared: ready=%#x status=%#x\n",
++		ready, status);
 +
 +	/* USB4 2.0 section 10.4.9: SET_FEC_READY needs a matching
 +	 * acknowledgment; its returned data bytes have no defined meaning.
@@ -844,11 +831,12 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +	}
 +	mutex_lock(&dp->state_lock);
 +	if (dp->enabled && dp->allocated) {
-+		dp->ready = true;
 +		ret = msm_dp_usb4_hpd(dp->display, true, false);
-+		dev_info(dp->dev, "DP receiver ready; HPD queued: %d\n", ret);
++		dp->ready = !ret;
++		dev_dbg(dp->dev, "DP receiver ready; HPD queued: %d\n", ret);
 +	}
 +	mutex_unlock(&dp->state_lock);
++	wake_up_all(&dp->ready_wait);
 +}
 +
 +static void dp_mailbox_work(struct work_struct *work)
@@ -916,8 +904,8 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +			reply = ret ? 0x11106 : 0x1106;
 +			break;
 +		case 0x1204:
-+			dev_info(dp->dev, "USB4 release: request adapter=%u allocated=%d ready=%d\n",
-+				 adapter, dp->allocated, dp->ready);
++			dev_dbg(dp->dev, "USB4 release: request adapter=%u allocated=%d ready=%d\n",
++				adapter, dp->allocated, dp->ready);
 +			if (!adapter && dp->allocated) {
 +				dp->allocated = false;
 +				dp->ready = false;
@@ -934,17 +922,17 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +			/* The capability worker takes state_lock at completion. Do
 +			 * not hold it while draining work or stopping the producer.
 +			 */
-+			dev_info(dp->dev, "USB4 release: drain caps\n");
++			dev_dbg(dp->dev, "USB4 release: drain caps\n");
 +			cancel_delayed_work_sync(&dp->caps_work);
-+			dev_info(dp->dev, "USB4 release: HPD sync enter\n");
++			dev_dbg(dp->dev, "USB4 release: HPD sync enter\n");
 +			ret = msm_dp_usb4_hpd_sync(dp->display, false, false);
-+			dev_info(dp->dev, "USB4 release: HPD sync return %d\n", ret);
++			dev_dbg(dp->dev, "USB4 release: HPD sync return %d\n", ret);
 +			if (!ret)
 +				ret = msm_dp_usb4_route(dp->display, 0);
-+			dev_info(dp->dev, "USB4 release: route return %d, clear resource\n", ret);
++			dev_dbg(dp->dev, "USB4 release: route return %d, clear resource\n", ret);
 +			writel(readl(dp->router + 0x84078) & ~BIT(31),
 +			       dp->router + 0x84078);
-+			dev_info(dp->dev, "USB4 release: resource cleared\n");
++			dev_dbg(dp->dev, "USB4 release: resource cleared\n");
 +			mutex_lock(&dp->state_lock);
 +			dp->release_failed = !!ret;
 +			if (ret) {
@@ -967,7 +955,6 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +		mutex_unlock(&dp->command_lock);
 +		if (release && !ret && !READ_ONCE(dp->stopping))
 +			schedule_work(&dp->link_work);
-+		dp->messages++;
 +		dev_dbg(dp->dev, "DP%u request %#x reply %#x\n", adapter, request, reply);
 +	}
 +	if (READ_ONCE(dp->enabled))
@@ -1048,6 +1035,7 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +	if (!dp || READ_ONCE(dp->stopping))
 +		return;
 +	WRITE_ONCE(dp->connected, connected);
++	wake_up_all(&dp->ready_wait);
 +	schedule_work(&dp->link_work);
 +}
 +
@@ -1095,6 +1083,7 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +	mutex_init(&dp->state_lock);
 +	mutex_init(&dp->fifo_lock);
 +	mutex_init(&dp->command_lock);
++	init_waitqueue_head(&dp->ready_wait);
 +	INIT_WORK(&dp->link_work, qcom_usb4_dp_link_work);
 +	INIT_DELAYED_WORK(&dp->mailbox_work, dp_mailbox_work);
 +	INIT_DELAYED_WORK(&dp->caps_work, dp_caps_work);
@@ -1143,7 +1132,7 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +		goto put_runtime;
 +	WRITE_ONCE(dp->enabled, true);
 +	queue_delayed_work(system_unbound_wq, &dp->mailbox_work, 0);
-+	dev_info(dp->dev, "DP0 mailbox owner and router AUX enabled\n");
++	dev_dbg(dp->dev, "DP0 mailbox owner and router AUX enabled\n");
 +	/* Discovery failure does not undo the live owner. A later link event
 +	 * can retry without creating an unbound child with active callbacks.
 +	 */
@@ -1157,16 +1146,6 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +	put_device(dp->display);
 +	dp->display = NULL;
 +out:
-+	mutex_unlock(&dp->lifecycle_lock);
-+	return ret;
-+}
-+
-+int qcom_usb4_dp_discover(struct qcom_usb4_dp *dp)
-+{
-+	int ret;
-+
-+	mutex_lock(&dp->lifecycle_lock);
-+	ret = dp_discover(dp);
 +	mutex_unlock(&dp->lifecycle_lock);
 +	return ret;
 +}
@@ -1187,6 +1166,7 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +		goto out;
 +	}
 +	WRITE_ONCE(dp->enabled, false);
++	wake_up_all(&dp->ready_wait);
 +	mutex_unlock(&dp->state_lock);
 +	cancel_delayed_work_sync(&dp->mailbox_work);
 +	cancel_delayed_work_sync(&dp->caps_work);
@@ -1204,7 +1184,7 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +	}
 +	put_device(dp->display);
 +	dp->display = NULL;
-+	dev_info(dp->dev, "experimental DP mailbox owner disabled\n");
++	dev_dbg(dp->dev, "experimental DP mailbox owner disabled\n");
 +out:
 +	mutex_unlock(&dp->lifecycle_lock);
 +	return ret;
@@ -1215,16 +1195,70 @@ index 0000000000000000000000000000000000000000..52a9332f1bc603747db78bb56f91e6b4
 +	return dp && READ_ONCE(dp->enabled);
 +}
 +
-+ssize_t qcom_usb4_dp_status(struct qcom_usb4_dp *dp, char *buf)
++int qcom_usb4_dp_sleep_prepare(struct qcom_usb4_dp *dp)
 +{
-+	return sysfs_emit(buf, "enabled %u allocated %u ready %u fifo_fault %u release_failed %u messages %u\n",
-+			  READ_ONCE(dp->enabled), READ_ONCE(dp->allocated),
-+			  READ_ONCE(dp->ready), READ_ONCE(dp->fifo_fault),
-+			  READ_ONCE(dp->release_failed), READ_ONCE(dp->messages));
++	int ret = 0;
++
++	if (!dp)
++		return 0;
++	mutex_lock(&dp->lifecycle_lock);
++	if (!dp->enabled)
++		goto out;
++	if (dp->sleep_display) {
++		ret = -EBUSY;
++		goto out;
++	}
++	ret = msm_dp_usb4_sleep_prepare(dp->display);
++	if (!ret)
++		dp->sleep_display = get_device(dp->display);
++out:
++	mutex_unlock(&dp->lifecycle_lock);
++	return ret;
++}
++
++int qcom_usb4_dp_sleep_complete(struct qcom_usb4_dp *dp, bool connected)
++{
++	struct device *display;
++	int ready_ret = 0, ret;
++	long left;
++
++	if (!dp)
++		return 0;
++	mutex_lock(&dp->lifecycle_lock);
++	display = dp->sleep_display;
++	mutex_unlock(&dp->lifecycle_lock);
++	if (!display)
++		return 0;
++
++	/* Probing is unblocked in PM_POST_SUSPEND. Do not hold the lock that
++	 * the new display consumer needs while waiting for tunnel readiness.
++	 */
++	if (connected) {
++		left = wait_event_timeout(dp->ready_wait,
++					  READ_ONCE(dp->ready) || !READ_ONCE(dp->connected),
++					  msecs_to_jiffies(DP_SLEEP_READY_MS));
++		if (!left)
++			ready_ret = -ETIMEDOUT;
++	}
++	mutex_lock(&dp->lifecycle_lock);
++	if (connected && dp->connected && dp->enabled && dp->allocated && dp->ready)
++		ready_ret = msm_dp_usb4_hpd_sync(dp->display, true, false);
++	else if (connected && !ready_ret)
++		ready_ret = -ENODEV;
++	if (ready_ret)
++		dev_err(dp->dev, "USB4 sleep display readiness failed: %d\n", ready_ret);
++	/* Also resume clients and the internal display if the partner went away
++	 * or restoration failed; never leave the saved modeset state orphaned.
++	 */
++	ret = msm_dp_usb4_sleep_complete(display);
++	dp->sleep_display = NULL;
++	put_device(display);
++	mutex_unlock(&dp->lifecycle_lock);
++	return ret ?: ready_ret;
 +}
 diff --git a/drivers/thunderbolt/qcom-usb4-dp.h b/drivers/thunderbolt/qcom-usb4-dp.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..59f4d84ceb97bf3aab7858e206236f8001ed6f20
+index 0000000000000000000000000000000000000000..b685d67ab3da21ce0fb39fc56e304daf8f19a4fd
 --- /dev/null
 +++ b/drivers/thunderbolt/qcom-usb4-dp.h
 @@ -0,0 +1,22 @@
@@ -1244,10 +1278,10 @@ index 0000000000000000000000000000000000000000..59f4d84ceb97bf3aab7858e206236f80
 +
 +struct qcom_usb4_dp *qcom_usb4_dp_create(struct device *dev, void __iomem *router);
 +int qcom_usb4_dp_enable(struct qcom_usb4_dp *dp);
-+int qcom_usb4_dp_discover(struct qcom_usb4_dp *dp);
 +int qcom_usb4_dp_disable(struct qcom_usb4_dp *dp, bool force);
 +bool qcom_usb4_dp_active(struct qcom_usb4_dp *dp);
-+ssize_t qcom_usb4_dp_status(struct qcom_usb4_dp *dp, char *buf);
++int qcom_usb4_dp_sleep_prepare(struct qcom_usb4_dp *dp);
++int qcom_usb4_dp_sleep_complete(struct qcom_usb4_dp *dp, bool connected);
 +
 +#endif
 diff --git a/drivers/thunderbolt/qcom-usb4-drom.c b/drivers/thunderbolt/qcom-usb4-drom.c
@@ -1562,10 +1596,10 @@ index 0000000000000000000000000000000000000000..d0775f9eb4513de9db55c1bdfed57c35
 +#endif
 diff --git a/drivers/thunderbolt/qcom-usb4-host.c b/drivers/thunderbolt/qcom-usb4-host.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fce4556fac
+index 0000000000000000000000000000000000000000..6e8118c742f9d8e7f397139899191a0bcab496b3
 --- /dev/null
 +++ b/drivers/thunderbolt/qcom-usb4-host.c
-@@ -0,0 +1,1366 @@
+@@ -0,0 +1,1276 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Qualcomm Glymur USB4 host router platform frontend.
@@ -1597,6 +1631,7 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +#include <linux/pinctrl/consumer.h>
 +#include <linux/platform_device.h>
 +#include <linux/pm_runtime.h>
++#include <linux/suspend.h>
 +#include <linux/regmap.h>
 +#include <linux/reset.h>
 +#include <linux/slab.h>
@@ -1637,6 +1672,8 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 + * reconnects.
 + */
 +#define QCOM_USB4_IDLE_STOP_MS		500
++/* Bound for the DisplayPort tunnel release before system sleep. */
++#define QCOM_USB4_SLEEP_STOP_MS		5000
 +#define QCOM_USB4_MAX_ROUTERS		3
 +
 +/* Verified board facts: PS8830 board retimer on every Surface Laptop 8 port. */
@@ -1644,10 +1681,6 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +
 +#define QCOM_USB4_DDR_PEAK_BW		MBps_to_icc(5000)
 +#define QCOM_USB4_APPS_PEAK_BW		MBps_to_icc(40)
-+
-+static bool qcom_startup = true;
-+module_param_named(qcom_startup, qcom_startup, bool, 0444);
-+MODULE_PARM_DESC(qcom_startup, "Bring up the Qualcomm USB4 router at probe (default: true)");
 +
 +enum qcom_usb4_pin_state {
 +	QCOM_USB4_PIN_RX_PREPARE,
@@ -1710,6 +1743,8 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +	enum qcom_usb4_link_request pending;
 +	u32 pending_command;
 +	bool connected;
++	/* Command of the current connection, repeated after system sleep. */
++	u32 connect_command;
 +
 +	bool started;
 +	/*
@@ -1722,12 +1757,23 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +	 */
 +	bool released;
 +	bool removing;
++	/*
++	 * System sleep: the router has no validated suspend sequence and loses
++	 * its state when its power domain is switched off, so it is stopped
++	 * like an unplugged partner beforehand and a connection is restored
++	 * like a new plug afterwards. @suspending blocks starts in between.
++	 */
++	bool suspending;
++	bool resume_connect;
++	struct notifier_block pm_nb;
++	bool pm_nb_registered;
 +	struct mutex lifecycle_lock;
 +	struct delayed_work lifecycle_work;
 +	bool nhi_probed;
 +	bool phy_initialized;
 +	bool mcu_irq_enabled;
-+	bool runtime_held;
++	/* Runtime PM reference, interconnect votes and clocks while running. */
++	bool powered;
 +
 +	struct completion stop_event;
 +	u32 event_consumer;
@@ -1945,11 +1991,11 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +			const u8 *rec = events.spans[i].data + (size_t)j * stride;
 +
 +			if (rec[0] == 1 && stride > 2)
-+				dev_info(host->dev, "MCU event type 1: %c %.*s\n", rec[1],
-+					 (int)stride - 2, rec + 2);
++				dev_dbg(host->dev, "MCU event type 1: %c %.*s\n", rec[1],
++					(int)stride - 2, rec + 2);
 +			else
-+				dev_info(host->dev, "MCU event type %u: %*ph\n", rec[0],
-+					 (int)min_t(u32, stride, 16), rec);
++				dev_dbg(host->dev, "MCU event type %u: %*ph\n", rec[0],
++					(int)min_t(u32, stride, 16), rec);
 +		}
 +	}
 +	host->event_consumer = events.producer;
@@ -1971,7 +2017,7 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +	if (ret)
 +		dev_err(host->dev, "%s command %#010x failed: %d\n", what, command, ret);
 +	else
-+		dev_info(host->dev, "%s command %#010x acknowledged\n", what, command);
++		dev_dbg(host->dev, "%s command %#010x acknowledged\n", what, command);
 +	return ret;
 +}
 +
@@ -1984,8 +2030,10 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +
 +	switch (host->pending) {
 +	case QCOM_USB4_LINK_CONNECT:
-+		if (!qcom_usb4_host_send_command(host, host->pending_command, "connect"))
++		if (!qcom_usb4_host_send_command(host, host->pending_command, "connect")) {
 +			host->connected = true;
++			host->connect_command = host->pending_command;
++		}
 +		break;
 +	case QCOM_USB4_LINK_DISCONNECT:
 +		if (host->connected &&
@@ -2050,10 +2098,10 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +		mutex_unlock(&host->lock);
 +		return 0;
 +	}
-+	dev_info(host->dev, "Type-C request: mode %lu orientation %d -> %s %#010x%s\n",
-+		 state->mode, host->orientation,
-+		 request == QCOM_USB4_LINK_CONNECT ? "connect" : "disconnect",
-+		 command, host->started ? "" : " (deferred until router startup)");
++	dev_dbg(host->dev, "Type-C request: mode %lu orientation %d -> %s %#010x%s\n",
++		state->mode, host->orientation,
++		request == QCOM_USB4_LINK_CONNECT ? "connect" : "disconnect",
++		command, host->started ? "" : " (deferred until router startup)");
 +	host->pending = request;
 +	host->pending_command = command;
 +	qcom_usb4_host_apply_link(host);
@@ -2300,6 +2348,55 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +	}
 +}
 +
++/*
++ * The router is powered only while it runs, so its power domain can be
++ * switched off with no USB4 partner and during system sleep.
++ */
++static int qcom_usb4_host_power_on(struct qcom_usb4_host *host)
++{
++	int ret;
++
++	if (host->powered)
++		return 0;
++	ret = pm_runtime_resume_and_get(host->dev);
++	if (ret < 0) {
++		dev_err(host->dev, "power on failed: %d\n", ret);
++		return ret;
++	}
++	ret = icc_set_bw(host->icc_ddr, 0, QCOM_USB4_DDR_PEAK_BW);
++	if (ret)
++		dev_warn(host->dev, "usb4-ddr bandwidth vote failed: %d\n", ret);
++	ret = icc_set_bw(host->icc_apps, 0, QCOM_USB4_APPS_PEAK_BW);
++	if (ret)
++		dev_warn(host->dev, "apps-usb4 bandwidth vote failed: %d\n", ret);
++	qcom_usb4_host_clocks_enable(host);
++	host->powered = true;
++	return 0;
++}
++
++static void qcom_usb4_host_power_off(struct qcom_usb4_host *host)
++{
++	int ret;
++
++	if (!host->powered)
++		return;
++	qcom_usb4_host_clocks_disable(host);
++	icc_set_bw(host->icc_apps, 0, 0);
++	icc_set_bw(host->icc_ddr, 0, 0);
++	/*
++	 * The stop holds the router block reset (GCC_USB4_0_BCR). The domain
++	 * cannot be switched on again while that reset is asserted ("status
++	 * stuck at 'off'"), whether by our next start or by genpd at system
++	 * resume, so release it before the domain goes off. The domain loses
++	 * the block's state anyway and the startup sequencer resets it again.
++	 */
++	ret = reset_control_deassert(host->router_reset);
++	if (ret)
++		dev_warn(host->dev, "router reset release at power off failed: %d\n", ret);
++	pm_runtime_put_sync(host->dev);
++	host->powered = false;
++}
++
 +static int qcom_usb4_host_start(struct qcom_usb4_host *host)
 +{
 +	struct qcom_usb4_start_config cfg = {
@@ -2331,8 +2428,8 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +			ret);
 +		return ret;
 +	}
-+	dev_info(host->dev, "router firmware running, shared memory at %#x\n",
-+		 host->start_state.shared_offset);
++	dev_dbg(host->dev, "router firmware running, shared memory at %#x\n",
++		host->start_state.shared_offset);
 +	return 0;
 +}
 +
@@ -2351,8 +2448,8 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +	caps = readl(nhi->iobase + REG_CAPS);
 +	paths = caps & 0x3ff;
 +	width = paths <= 10 ? QCOM_USB4_IRQ_32 : QCOM_USB4_IRQ_NATIVE_64;
-+	dev_info(host->dev, "NHI capabilities %#010x: %u paths, version %lu\n",
-+		 caps, paths, FIELD_GET(REG_CAPS_VERSION_MASK, caps));
++	dev_dbg(host->dev, "NHI capabilities %#010x: %u paths, version %lu\n",
++		caps, paths, FIELD_GET(REG_CAPS_VERSION_MASK, caps));
 +
 +	ret = qcom_usb4_nhi_prepare(&host->qnhi, QCOM_USB4_ROUTER_SIZE - QCOM_USB4_NHI_OFFSET,
 +				    paths, width, host->nhi_irq);
@@ -2379,17 +2476,26 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 + * power and firmware release. Starting it again repeats the probe-time cold
 + * start and NHI probe.
 + */
-+static void qcom_usb4_host_release(struct qcom_usb4_host *host)
++static void qcom_usb4_host_stop_all(struct qcom_usb4_host *host)
 +{
-+	dev_info(host->dev, "no USB4 partner: stopping USB4 host router %u\n", host->port);
 +	if (host->nhi_probed) {
 +		/* Domain removal ends in our NHI shutdown, which stops the hardware. */
 +		nhi_remove(&host->qnhi.nhi);
 +		host->nhi_probed = false;
 +		pm_runtime_put_noidle(host->dev);
++		/* Undo the pm_runtime_forbid() of qcom_usb4_host_probe_nhi(). */
++		pm_runtime_allow(host->dev);
 +	} else {
 +		qcom_usb4_host_stop_hardware(host);
 +	}
++	qcom_usb4_host_power_off(host);
++}
++
++static void qcom_usb4_host_release(struct qcom_usb4_host *host)
++{
++	dev_dbg(host->dev, "%s: stopping USB4 host router %u\n",
++		host->suspending ? "system sleep" : "no USB4 partner", host->port);
++	qcom_usb4_host_stop_all(host);
 +	host->released = true;
 +}
 +
@@ -2397,8 +2503,11 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +{
 +	int ret;
 +
-+	dev_info(host->dev, "USB4 partner: starting USB4 host router %u\n", host->port);
++	dev_dbg(host->dev, "USB4 partner: starting USB4 host router %u\n", host->port);
 +	ret = qcom_usb4_nhi_reset(&host->qnhi);
++	if (ret)
++		return ret;
++	ret = qcom_usb4_host_power_on(host);
 +	if (ret)
 +		return ret;
 +	ret = qcom_usb4_host_start(host);
@@ -2422,11 +2531,12 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +	host->started = true;
 +	qcom_usb4_host_apply_link(host);
 +	mutex_unlock(&host->lock);
-+	dev_info(host->dev, "USB4 host router %u up\n", host->port);
++	dev_dbg(host->dev, "USB4 host router %u up\n", host->port);
 +	return 0;
 +
 +err_stop:
 +	qcom_usb4_host_stop_hardware(host);
++	qcom_usb4_host_power_off(host);
 +	dev_err(host->dev, "USB4 host router %u not started (%d)\n", host->port, ret);
 +	return ret;
 +}
@@ -2448,7 +2558,7 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +					 msecs_to_jiffies(QCOM_USB4_IDLE_STOP_MS));
 +			release = false;
 +		}
-+		acquire = !host->removing && host->released &&
++		acquire = !host->removing && !host->suspending && host->released &&
 +			  host->pending == QCOM_USB4_LINK_CONNECT;
 +		/* Stop sending commands before the hardware goes away. */
 +		if (release)
@@ -2463,286 +2573,132 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +	mutex_unlock(&host->lifecycle_lock);
 +}
 +
-+static ssize_t startup_state_show(struct device *dev, struct device_attribute *attr,
-+				  char *buf)
++/*
++ * Save and atomically stop modesetting before disconnecting the USB4 provider.
++ * The compositor may already be frozen by the sleep service. Restoring the
++ * saved state is deferred until PM_POST_SUSPEND, after provider reprobes are
++ * allowed again and its DisplayPort tunnel is ready.
++ */
++static int qcom_usb4_host_sleep_prepare(struct qcom_usb4_host *host)
 +{
-+	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
-+
-+	if (!host)
-+		return -ENODEV;
-+	return sysfs_emit(buf, "phase %d active_step %d last_completed %d error %d shared %#x started %d nhi %d connected %d\n",
-+			  host->start_state.phase, host->start_state.active_step,
-+			  host->start_state.last_completed_step, host->start_state.error,
-+			  host->start_state.shared_offset, host->started, host->nhi_probed,
-+			  host->connected);
-+}
-+static DEVICE_ATTR_RO(startup_state);
-+
-+/* Bring-up only: send one raw mailbox word (hex) to running router firmware. */
-+static ssize_t mailbox_store(struct device *dev, struct device_attribute *attr,
-+			     const char *buf, size_t count)
-+{
-+	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
++	unsigned long deadline;
 +	u32 command;
++	bool started;
 +	int ret;
 +
-+	if (!host)
-+		return -ENODEV;
-+	ret = kstrtou32(buf, 16, &command);
-+	if (ret)
++	/* Let a start in progress finish first, and block starts until resume. */
++	mutex_lock(&host->lifecycle_lock);
++	mutex_lock(&host->lock);
++	host->suspending = true;
++	host->resume_connect = host->connected || host->pending == QCOM_USB4_LINK_CONNECT;
++	started = host->started;
++	mutex_unlock(&host->lock);
++
++	ret = started ? qcom_usb4_dp_sleep_prepare(host->dp) : 0;
++	if (ret) {
++		dev_err(host->dev, "USB4 sleep display shutdown failed: %d\n", ret);
++		mutex_unlock(&host->lifecycle_lock);
 +		return ret;
++	}
 +	mutex_lock(&host->lock);
-+	if (!host->started)
-+		ret = -EHOSTDOWN;
-+	else
-+		ret = qcom_usb4_host_send_command(host, command, "manual");
++	if (host->connected && !qcom_usb4_typec_disconnect_command(&command)) {
++		host->pending = QCOM_USB4_LINK_DISCONNECT;
++		host->pending_command = command;
++		qcom_usb4_host_apply_link(host);
++	}
++	if (started && !host->removing)
++		mod_delayed_work(system_long_wq, &host->lifecycle_work, 0);
 +	mutex_unlock(&host->lock);
-+	return ret ?: count;
-+}
-+static DEVICE_ATTR_WO(mailbox);
++	mutex_unlock(&host->lifecycle_lock);
 +
-+/*
-+ * Bring-up only: the Windows display driver programs a per-DP-IN register
-+ * block inside the router window (0x83000 for the first DP IN adapter,
-+ * +0x3000 for the second) plus a few shared words. Dump the words it uses
-+ * so the DisplayPort tunneling work can compare live state with Windows.
-+ */
-+#define QCOM_USB4_DPIN_BLOCK(n)		(0x83000 + (n) * 0x3000)
-+#define QCOM_USB4_DPIN_CTRL		0x150
-+#define QCOM_USB4_DPIN_STATUS		0x154
-+#define QCOM_USB4_DPIN_CONFIG		0x158
-+#define QCOM_USB4_DPIN_CMD_RESP		0x22c
-+#define QCOM_USB4_DPIN_CMD		0x230
-+#define QCOM_USB4_DPIN_CMD_TIMEOUT_MS	1000
-+
-+static ssize_t dpin_regs_show(struct device *dev, struct device_attribute *attr,
-+			      char *buf)
-+{
-+	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
-+	static const u32 shared[] = { 0x7f400, 0x7f404, 0x7f408, 0x7f40c,
-+				      0x84040, 0x84044, 0x84048, 0x8404c,
-+				      0x84070, 0x84074, 0x84078, 0x8407c,
-+				      0x85000, 0x85004, 0x85008, 0x8500c,
-+				      0x87040, 0x87044, 0x87070, 0x87074,
-+				      0x87078, 0x88000, 0x88004, 0x88008,
-+				      0x8800c };
-+	ssize_t len = 0;
-+	unsigned int n, i;
-+
-+	if (!host)
-+		return -ENODEV;
-+	mutex_lock(&host->lock);
-+	if (!host->started) {
++	deadline = jiffies + msecs_to_jiffies(QCOM_USB4_SLEEP_STOP_MS);
++	while (started) {
++		flush_delayed_work(&host->lifecycle_work);
++		mutex_lock(&host->lock);
++		started = host->started;
 +		mutex_unlock(&host->lock);
-+		return -EHOSTDOWN;
++		if (!started)
++			break;
++		if (time_after(jiffies, deadline)) {
++			dev_err(host->dev, "USB4 host router %u did not stop; refusing system sleep\n",
++				host->port);
++			return -EBUSY;
++		}
++		msleep(50);
 +	}
-+	for (n = 0; n < 2; n++) {
-+		u32 base = QCOM_USB4_DPIN_BLOCK(n);
-+
-+		len += sysfs_emit_at(buf, len, "dpin%u @%#x:", n, base);
-+		for (i = 0; i < 0x40; i += 4)
-+			len += sysfs_emit_at(buf, len, " %08x",
-+					     readl(host->router + base + i));
-+		len += sysfs_emit_at(buf, len, "\n");
-+		len += sysfs_emit_at(buf, len, "dpin%u +0x140:", n);
-+		for (i = 0x140; i < 0x160; i += 4)
-+			len += sysfs_emit_at(buf, len, " %08x",
-+					     readl(host->router + base + i));
-+		len += sysfs_emit_at(buf, len, "\n");
-+		len += sysfs_emit_at(buf, len, "dpin%u +0x220:", n);
-+		for (i = 0x220; i < 0x240; i += 4)
-+			len += sysfs_emit_at(buf, len, " %08x",
-+					     readl(host->router + base + i));
-+		len += sysfs_emit_at(buf, len, "\n");
-+	}
-+	len += sysfs_emit_at(buf, len, "shared:");
-+	for (i = 0; i < ARRAY_SIZE(shared); i++)
-+		len += sysfs_emit_at(buf, len, " %#x=%08x", shared[i],
-+				     readl(host->router + shared[i]));
-+	len += sysfs_emit_at(buf, len, "\n");
-+	mutex_unlock(&host->lock);
-+	return len;
-+}
-+static DEVICE_ATTR_RO(dpin_regs);
-+
-+/*
-+ * Bring-up only: "<adapter> <hex command>" writes one DPSW command word the
-+ * way the Windows display driver does (command register, poll for clear,
-+ * read the response word). The result is logged, not acted upon.
-+ */
-+static ssize_t dpsw_store(struct device *dev, struct device_attribute *attr,
-+			  const char *buf, size_t count)
-+{
-+	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
-+	unsigned int adapter, waited = 0;
-+	u32 command, pending, response;
-+	void __iomem *block;
-+
-+	if (!host)
-+		return -ENODEV;
-+	if (qcom_usb4_dp_active(host->dp))
-+		return -EBUSY;
-+	if (sscanf(buf, "%u %x", &adapter, &command) != 2 || adapter > 1)
-+		return -EINVAL;
-+	mutex_lock(&host->lock);
-+	if (!host->started) {
-+		mutex_unlock(&host->lock);
-+		return -EHOSTDOWN;
-+	}
-+	block = host->router + QCOM_USB4_DPIN_BLOCK(adapter);
-+	pending = readl(block + QCOM_USB4_DPIN_CMD);
-+	if (pending) {
-+		dev_warn(dev, "DPSW adapter %u busy: command %#x pending\n",
-+			 adapter, pending);
-+		mutex_unlock(&host->lock);
-+		return -EBUSY;
-+	}
-+	writel(command, block + QCOM_USB4_DPIN_CMD);
-+	do {
-+		msleep(10);
-+		waited += 10;
-+		pending = readl(block + QCOM_USB4_DPIN_CMD);
-+	} while (pending && waited < QCOM_USB4_DPIN_CMD_TIMEOUT_MS);
-+	response = readl(block + QCOM_USB4_DPIN_CMD_RESP);
-+	dev_info(dev, "DPSW adapter %u command %#x: %s after %u ms, response %#x, ctrl %08x status %08x config %08x\n",
-+		 adapter, command, pending ? "still pending" : "consumed", waited,
-+		 response, readl(block + QCOM_USB4_DPIN_CTRL),
-+		 readl(block + QCOM_USB4_DPIN_STATUS),
-+		 readl(block + QCOM_USB4_DPIN_CONFIG));
-+	mutex_unlock(&host->lock);
-+	return pending ? -ETIMEDOUT : count;
-+}
-+static DEVICE_ATTR_WO(dpsw);
-+
-+/*
-+ * Bring-up only: "<hex offset> <hex value>" writes one word into the DP IN
-+ * glue area of the router window (0x7f000..0x89fff), for replaying the
-+ * Windows display driver's register sequence by hand.
-+ */
-+static ssize_t poke_store(struct device *dev, struct device_attribute *attr,
-+			  const char *buf, size_t count)
-+{
-+	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
-+	u32 offset, value, before;
-+
-+	if (!host)
-+		return -ENODEV;
-+	if (qcom_usb4_dp_active(host->dp))
-+		return -EBUSY;
-+	if (sscanf(buf, "%x %x", &offset, &value) != 2 || offset & 3 ||
-+	    offset < 0x7f000 || offset >= 0x8a000)
-+		return -EINVAL;
-+	mutex_lock(&host->lock);
-+	if (!host->started) {
-+		mutex_unlock(&host->lock);
-+		return -EHOSTDOWN;
-+	}
-+	before = readl(host->router + offset);
-+	writel(value, host->router + offset);
-+	dev_info(dev, "poke %#x: %08x -> wrote %08x, reads %08x\n", offset, before,
-+		 value, readl(host->router + offset));
-+	mutex_unlock(&host->lock);
-+	return count;
-+}
-+static DEVICE_ATTR_WO(poke);
-+
-+/*
-+ * Bring-up only: run the USB4 DP resource router operations on demand.
-+ * "query <port>" addresses a host router DP IN adapter; "retry" re-runs
-+ * the connection manager's DP IN discovery and DP tunneling.
-+ *
-+ * Raw allocation/deallocation cannot be exposed here: they bypass the
-+ * connection manager's resource list and live tunnels. In particular,
-+ * deallocation can release the producer while its tunnel still owns it.
-+ * This is invalid even with the experimental display provider disabled.
-+ */
-+static ssize_t dp_resource_store(struct device *dev, struct device_attribute *attr,
-+				 const char *buf, size_t count)
-+{
-+	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
-+	struct tb_switch *sw;
-+	struct tb_port *port;
-+	unsigned int number;
-+	struct tb *tb;
-+	char op[8], extra;
-+
-+	if (!host)
-+		return -ENODEV;
-+	if (sscanf(buf, "%7s", op) != 1)
-+		return -EINVAL;
-+	if (!strcmp(op, "alloc") || !strcmp(op, "dealloc"))
-+		return -EOPNOTSUPP;
-+	if (!host->nhi_probed)
-+		return -EHOSTDOWN;
-+	tb = dev_get_drvdata(host->dev);
-+	if (!tb)
-+		return -ENODEV;
-+	if (sysfs_streq(buf, "retry")) {
-+		tb_qcom_retry_dp_resources(tb);
-+		return count;
-+	}
-+	if (sscanf(buf, "%7s %u %c", op, &number, &extra) != 2 ||
-+	    strcmp(op, "query"))
-+		return -EINVAL;
-+	mutex_lock(&tb->lock);
-+	sw = tb->root_switch;
-+	if (!sw || number > sw->config.max_port_number) {
-+		mutex_unlock(&tb->lock);
-+		return -ENODEV;
-+	}
-+	port = &sw->ports[number];
-+	if (!tb_port_is_dpin(port)) {
-+		mutex_unlock(&tb->lock);
-+		return -EINVAL;
-+	}
-+	dev_info(dev, "port %u query: %s\n", number,
-+		 tb_switch_query_dp_resource(sw, port) ? "available" : "not available");
-+	mutex_unlock(&tb->lock);
-+	return count;
-+}
-+static DEVICE_ATTR_WO(dp_resource);
-+
-+static ssize_t usb4_dp_show(struct device *dev, struct device_attribute *attr,
-+			   char *buf)
-+{
-+	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
-+
-+	if (!host || !host->dp)
-+		return -ENODEV;
-+	return qcom_usb4_dp_status(host->dp, buf);
++	return 0;
 +}
 +
-+static ssize_t usb4_dp_store(struct device *dev, struct device_attribute *attr,
-+			    const char *buf, size_t count)
++static void qcom_usb4_host_sleep_complete(struct qcom_usb4_host *host)
 +{
-+	struct qcom_usb4_host *host = qcom_usb4_host_from_dev(dev);
++	bool acquire, connected;
 +	int ret;
 +
-+	if (!host || !host->dp || !host->started || !host->nhi_probed)
-+		return -ENODEV;
-+	if (sysfs_streq(buf, "on"))
-+		ret = qcom_usb4_dp_enable(host->dp);
-+	else if (sysfs_streq(buf, "off"))
-+		ret = qcom_usb4_dp_disable(host->dp, false);
-+	else if (sysfs_streq(buf, "discover"))
-+		ret = qcom_usb4_dp_discover(host->dp);
-+	else
-+		return -EINVAL;
-+	return ret ? ret : count;
-+}
-+static DEVICE_ATTR_RW(usb4_dp);
++	mutex_lock(&host->lifecycle_lock);
++	mutex_lock(&host->lock);
++	host->suspending = false;
++	/* No Type-C event during sleep: reconnect the partner we detached. */
++	if (host->resume_connect && host->pending == QCOM_USB4_LINK_NONE &&
++	    host->connect_command && !host->connected) {
++		host->pending = QCOM_USB4_LINK_CONNECT;
++		host->pending_command = host->connect_command;
++	}
++	host->resume_connect = false;
++	acquire = !host->removing && host->released &&
++		  host->pending == QCOM_USB4_LINK_CONNECT;
++	/* A failed prepare may leave the router running. Reapply a pending
++	 * connection before restoring modesetting, rather than waiting forever
++	 * for the released-only acquisition path.
++	 */
++	if (!host->removing && host->started &&
++	    host->pending == QCOM_USB4_LINK_CONNECT)
++		qcom_usb4_host_apply_link(host);
++	mutex_unlock(&host->lock);
 +
-+static struct attribute *qcom_usb4_host_attrs[] = {
-+	&dev_attr_startup_state.attr,
-+	&dev_attr_mailbox.attr,
-+	&dev_attr_dpin_regs.attr,
-+	&dev_attr_dpsw.attr,
-+	&dev_attr_poke.attr,
-+	&dev_attr_dp_resource.attr,
-+	&dev_attr_usb4_dp.attr,
-+	NULL,
-+};
-+ATTRIBUTE_GROUPS(qcom_usb4_host);
++	/* Synchronous restart: return to the sleep service only after restoring
++	 * the saved display state, before it thaws the desktop session.
++	 */
++	if (acquire) {
++		ret = qcom_usb4_host_acquire(host);
++		if (ret)
++			dev_err(host->dev, "USB4 sleep router restart failed: %d\n", ret);
++	}
++	mutex_lock(&host->lock);
++	connected = host->started && host->connected && !host->removing;
++	mutex_unlock(&host->lock);
++	ret = qcom_usb4_dp_sleep_complete(host->dp, connected);
++	if (ret)
++		dev_err(host->dev, "USB4 sleep display restore failed: %d\n", ret);
++	mutex_unlock(&host->lifecycle_lock);
++}
++
++static int qcom_usb4_host_pm_notify(struct notifier_block *nb, unsigned long action,
++				    void *data)
++{
++	struct qcom_usb4_host *host = container_of(nb, struct qcom_usb4_host, pm_nb);
++	int ret;
++
++	switch (action) {
++	case PM_SUSPEND_PREPARE:
++	case PM_HIBERNATION_PREPARE:
++	case PM_RESTORE_PREPARE:
++		ret = qcom_usb4_host_sleep_prepare(host);
++		if (ret) {
++			/* The robust notifier chain unwinds earlier callbacks, not
++			 * this failing callback. Undo our own preparation here.
++			 */
++			qcom_usb4_host_sleep_complete(host);
++			return notifier_from_errno(ret);
++		}
++		break;
++	case PM_POST_SUSPEND:
++	case PM_POST_HIBERNATION:
++	case PM_POST_RESTORE:
++		qcom_usb4_host_sleep_complete(host);
++		break;
++	}
++	return NOTIFY_DONE;
++}
 +
 +static int qcom_usb4_host_probe(struct platform_device *pdev)
 +{
@@ -2796,37 +2752,26 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +	if (ret)
 +		goto err_unlist;
 +
-+	if (!qcom_startup) {
-+		dev_warn(dev, "router startup disabled by module parameter\n");
-+		return 0;
-+	}
-+
++	/*
++	 * genpd switched the domain on and applied the required-opps vote when
++	 * it attached the device, so start active: the runtime suspend that
++	 * follows probe releases both until the first start
++	 * (qcom_usb4_host_power_on()).
++	 */
++	ret = pm_runtime_set_active(dev);
++	if (ret)
++		goto err_unlist;
 +	ret = devm_pm_runtime_enable(dev);
 +	if (ret)
 +		goto err_unlist;
-+	ret = pm_runtime_resume_and_get(dev);
-+	if (ret < 0) {
-+		dev_err(dev, "power on failed: %d\n", ret);
-+		goto err_unlist;
-+	}
-+	host->runtime_held = true;
-+
-+	ret = icc_set_bw(host->icc_ddr, 0, QCOM_USB4_DDR_PEAK_BW);
-+	if (ret)
-+		dev_warn(dev, "usb4-ddr bandwidth vote failed: %d\n", ret);
-+	ret = icc_set_bw(host->icc_apps, 0, QCOM_USB4_APPS_PEAK_BW);
-+	if (ret)
-+		dev_warn(dev, "apps-usb4 bandwidth vote failed: %d\n", ret);
-+
-+	qcom_usb4_host_clocks_enable(host);
 +
 +	ret = request_firmware(&host->fw, fw_name, dev);
 +	if (ret) {
 +		dev_err(dev, "router firmware %s unavailable: %d\n", fw_name, ret);
 +		goto out_stopped;
 +	}
-+	dev_info(dev, "router firmware %s: %zu bytes, SoC serial %#x\n", fw_name,
-+		 host->fw->size, host->serial);
++	dev_dbg(dev, "router firmware %s: %zu bytes, SoC serial %#x\n", fw_name,
++		host->fw->size, host->serial);
 +
 +	ret = devm_request_threaded_irq(dev, host->mcu_irq, NULL, qcom_usb4_host_mcu_irq,
 +					IRQF_ONESHOT, "qcom-usb4-mcu", host);
@@ -2835,6 +2780,14 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +		goto out_stopped;
 +	}
 +
++	host->pm_nb.notifier_call = qcom_usb4_host_pm_notify;
++	ret = register_pm_notifier(&host->pm_nb);
++	if (ret) {
++		dev_err(dev, "PM notifier registration failed: %d\n", ret);
++		goto out_stopped;
++	}
++	host->pm_nb_registered = true;
++
 +	/* The router starts on the first USB4 or Thunderbolt entry. */
 +	mutex_lock(&host->lock);
 +	host->released = true;
@@ -2842,7 +2795,7 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +		mod_delayed_work(system_long_wq, &host->lifecycle_work, 0);
 +	mutex_unlock(&host->lock);
 +
-+	dev_info(dev, "USB4 host router %u ready\n", host->port);
++	dev_dbg(dev, "USB4 host router %u ready\n", host->port);
 +	return 0;
 +
 +out_stopped:
@@ -2862,24 +2815,16 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +{
 +	unsigned int i;
 +
++	if (host->pm_nb_registered) {
++		unregister_pm_notifier(&host->pm_nb);
++		host->pm_nb_registered = false;
++	}
 +	mutex_lock(&host->lock);
 +	host->removing = true;
 +	mutex_unlock(&host->lock);
 +	cancel_delayed_work_sync(&host->lifecycle_work);
 +	mutex_lock(&host->lifecycle_lock);
-+	if (host->nhi_probed) {
-+		/* Domain removal ends in our NHI shutdown, which stops the hardware. */
-+		nhi_remove(&host->qnhi.nhi);
-+		host->nhi_probed = false;
-+		pm_runtime_put_noidle(host->dev);
-+	} else {
-+		qcom_usb4_host_stop_hardware(host);
-+	}
-+	qcom_usb4_host_clocks_disable(host);
-+	if (host->runtime_held) {
-+		pm_runtime_put_sync(host->dev);
-+		host->runtime_held = false;
-+	}
++	qcom_usb4_host_stop_all(host);
 +	if (host->fw) {
 +		release_firmware(host->fw);
 +		host->fw = NULL;
@@ -2923,7 +2868,6 @@ index 0000000000000000000000000000000000000000..05daea039c63edbe5e3250aa72d3c7fc
 +	.driver = {
 +		.name = "qcom-usb4-host",
 +		.of_match_table = qcom_usb4_host_of_match,
-+		.dev_groups = qcom_usb4_host_groups,
 +		/*
 +		 * The Type-C consumers keep this device's switch and mux for the
 +		 * life of the port and have no way to drop them on unbind.
@@ -4458,10 +4402,10 @@ index 0000000000000000000000000000000000000000..fe90e894d322ee61babb58952b637dd0
 +#endif
 diff --git a/include/linux/soc/qcom/usb4-dp.h b/include/linux/soc/qcom/usb4-dp.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..18f8b49e08755efa0363810ccb66a271040e591c
+index 0000000000000000000000000000000000000000..28dd9f1ef5fd2fabf568e430d2c2f5f8da291cf1
 --- /dev/null
 +++ b/include/linux/soc/qcom/usb4-dp.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,55 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +#ifndef _QCOM_USB4_DP_H
 +#define _QCOM_USB4_DP_H
@@ -4498,6 +4442,9 @@ index 0000000000000000000000000000000000000000..18f8b49e08755efa0363810ccb66a271
 +/* Returns -EBUSY on disconnect while DRM still owns an active/prepared link. */
 +int msm_dp_usb4_hpd_sync(struct device *dev, bool connected, bool irq);
 +int msm_dp_usb4_route(struct device *dev, unsigned int resource);
++/* Paired system-sleep calls; restore after the provider has returned. */
++int msm_dp_usb4_sleep_prepare(struct device *dev);
++int msm_dp_usb4_sleep_complete(struct device *dev);
 +#else
 +static inline int msm_dp_usb4_attach(struct device *dev, struct drm_dp_aux *aux,
 +		const struct msm_dp_usb4_ops *ops, void *data) { return -ENODEV; }
@@ -4507,6 +4454,10 @@ index 0000000000000000000000000000000000000000..18f8b49e08755efa0363810ccb66a271
 +static inline int msm_dp_usb4_hpd_sync(struct device *dev, bool connected, bool irq)
 +{ return -ENODEV; }
 +static inline int msm_dp_usb4_route(struct device *dev, unsigned int resource)
++{ return -ENODEV; }
++static inline int msm_dp_usb4_sleep_prepare(struct device *dev)
++{ return -ENODEV; }
++static inline int msm_dp_usb4_sleep_complete(struct device *dev)
 +{ return -ENODEV; }
 +#endif
 +#endif

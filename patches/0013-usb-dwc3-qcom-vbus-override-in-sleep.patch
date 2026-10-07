@@ -1,0 +1,113 @@
+Subject: [REVIEW 13/16] dwc3-qcom: defer the role-switch VBUS override while the glue is suspended
+
+Unplugging any USB data partner from either USB-C port during s2idle reset the Surface. UCSI handles the detach on a workqueue that is not frozen and sets the USB role to none; dwc3_qcom_set_role_notifier() then writes the QSCRATCH VBUS override. System suspend has already gated the glue clocks, and the runtime PM reference taken there does not resume a glue that is still runtime-active, so the access stalls until a watchdog resets the SoC. A mutex now serializes the override with clock gating. While the glue is suspended, the override is recorded and dwc3_qcom_resume() applies it once the clocks are on, with the same register values. The defect is in stock 7.3-rc2 code and not specific to USB4.
+
+Dependencies: Applies to the dwc3-qcom.c of patch 04; the hunks change only stock code paths (probe, suspend, resume and the role notifier).
+
+Source attribution: Local fix (candidate 1.144) to upstream code from Krishna Kurapati's 2025 series "usb: dwc3: Modify role-switching QC drd usb controllers". Not posted.
+
+This is a review grouping of preserved source, not a new authorship claim or
+an independently build-validated upstream commit. Original attribution remains
+in the referenced provenance files. No new Signed-off-by trailers are added.
+
+---
+diff --git a/drivers/usb/dwc3/dwc3-qcom.c b/drivers/usb/dwc3/dwc3-qcom.c
+index dd654f2e427cd47bc1dd1f1d748137eed325d0e6..a6cef282c9cd835a70179785bb66a691ead0da09 100644
+--- a/drivers/usb/dwc3/dwc3-qcom.c
++++ b/drivers/usb/dwc3/dwc3-qcom.c
+@@ -87,6 +87,14 @@ struct dwc3_qcom {
+ 	struct icc_path		*icc_path_apps;
+ 
+ 	enum usb_role		current_role;
++
++	/*
++	 * Serialises the role-switch QSCRATCH update with clock gating. A role
++	 * change while the glue is suspended is applied when it resumes.
++	 */
++	struct mutex		vbus_lock;
++	bool			vbus_override_pending;
++	bool			vbus_override;
+ };
+ 
+ #define to_dwc3_qcom(d) container_of((d), struct dwc3_qcom, dwc)
+@@ -353,6 +361,7 @@ static int dwc3_qcom_suspend(struct dwc3_qcom *qcom, bool wakeup)
+ 	if (qcom->is_suspended)
+ 		return 0;
+ 
++	mutex_lock(&qcom->vbus_lock);
+ 	for (i = 0; i < qcom->num_ports; i++) {
+ 		val = readl(qcom->qscratch_base + pwr_evnt_irq_stat_reg[i]);
+ 		if (!(val & PWR_EVNT_LPM_IN_L2_MASK))
+@@ -375,6 +384,7 @@ static int dwc3_qcom_suspend(struct dwc3_qcom *qcom, bool wakeup)
+ 	}
+ 
+ 	qcom->is_suspended = true;
++	mutex_unlock(&qcom->vbus_lock);
+ 
+ 	return 0;
+ }
+@@ -390,14 +400,22 @@ static int dwc3_qcom_resume(struct dwc3_qcom *qcom, bool wakeup)
+ 	if (dwc3_qcom_is_host(qcom) && wakeup)
+ 		dwc3_qcom_disable_interrupts(qcom);
+ 
++	mutex_lock(&qcom->vbus_lock);
+ 	ret = clk_bulk_prepare_enable(qcom->num_clocks, qcom->clks);
+-	if (ret < 0)
++	if (ret < 0) {
++		mutex_unlock(&qcom->vbus_lock);
+ 		return ret;
++	}
+ 
+ 	ret = dwc3_qcom_interconnect_enable(qcom);
+ 	if (ret)
+ 		dev_warn(qcom->dev, "failed to enable interconnect: %d\n", ret);
+ 
++	if (qcom->vbus_override_pending) {
++		dwc3_qcom_vbus_override_enable(qcom, qcom->vbus_override);
++		qcom->vbus_override_pending = false;
++	}
++
+ 	/* Clear existing events from PHY related to L2 in/out */
+ 	for (i = 0; i < qcom->num_ports; i++) {
+ 		dwc3_qcom_setbits(qcom->qscratch_base,
+@@ -406,6 +424,7 @@ static int dwc3_qcom_resume(struct dwc3_qcom *qcom, bool wakeup)
+ 	}
+ 
+ 	qcom->is_suspended = false;
++	mutex_unlock(&qcom->vbus_lock);
+ 
+ 	return 0;
+ }
+@@ -626,10 +645,20 @@ static void dwc3_qcom_set_role_notifier(struct dwc3 *dwc, enum usb_role next_rol
+ 		return;
+ 	}
+ 
+-	if (qcom->current_role == USB_ROLE_DEVICE)
+-		dwc3_qcom_vbus_override_enable(qcom, false);
+-	else if (qcom->current_role != USB_ROLE_DEVICE)
+-		dwc3_qcom_vbus_override_enable(qcom, true);
++	/*
++	 * System suspend gates the clocks of a runtime-active glue, so the
++	 * runtime reference above does not make QSCRATCH accessible. The Type-C
++	 * stack still switches roles meanwhile (cable removal during sleep):
++	 * defer the override to resume rather than stall on unclocked registers.
++	 */
++	mutex_lock(&qcom->vbus_lock);
++	if (qcom->is_suspended) {
++		qcom->vbus_override = qcom->current_role != USB_ROLE_DEVICE;
++		qcom->vbus_override_pending = true;
++	} else {
++		dwc3_qcom_vbus_override_enable(qcom, qcom->current_role != USB_ROLE_DEVICE);
++	}
++	mutex_unlock(&qcom->vbus_lock);
+ 
+ 	pm_runtime_mark_last_busy(qcom->dev);
+ 	pm_runtime_put_sync(qcom->dev);
+@@ -680,6 +709,7 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
+ 		return -ENOMEM;
+ 
+ 	qcom->dev = &pdev->dev;
++	mutex_init(&qcom->vbus_lock);
+ 
+ 	qcom->resets = devm_reset_control_array_get_optional_exclusive(dev);
+ 	if (IS_ERR(qcom->resets)) {

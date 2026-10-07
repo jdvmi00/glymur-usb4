@@ -7,3 +7,10 @@
 0007-drm-msm-dp-tunneling.patch
 0008-arm64-dts-qcom-usb4.patch
 0009-arm64-dts-surface-usb4.patch
+0010-phy-qcom-qmp-combo-usb4-sleep-clamp.patch
+0011-clk-qcom-glymur-usb4-wakeup-path.patch
+0012-thunderbolt-usb3-reactivation-delay.patch
+0013-usb-dwc3-qcom-vbus-override-in-sleep.patch
+0014-usb-dwc3-usb4-tunnel-sleep.patch
+0015-drm-msm-dpu-usb4-route-cache.patch
+0016-thunderbolt-qcom-router-sleep.patch

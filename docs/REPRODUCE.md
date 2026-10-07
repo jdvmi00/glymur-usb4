@@ -13,10 +13,20 @@ python -B tools/review.py test
 ```
 
 The helper checks the archive hash, applies the 39 preserved baseline patches
-and board DTS, then every patch in `patches/series` order. It verifies all 93 final-source
-hashes and the saved configuration. Output is
+and board DTS, then every patch in `patches/series` order. It verifies all 98
+final-source hashes and the saved configuration. Output is
 `build-output/reconstructed/linux-7.3-rc2/`; an existing destination is refused.
 No kernel compilation, installation or hardware access occurs.
+
+The result is the series as of Surface candidate 1.151, not a byte copy of the
+tested 1.151 kernel. That kernel also carried board, wireless, GPU and power
+changes outside this series (see [the change list](CHANGES-1.151.md)) and no
+longer applied baseline patch 0010. Of the 98 files checked, 93 equal their
+1.151 versions; the other five also carry those changes in 1.151. The saved
+configuration is the 1.73 checkpoint; the tested kernel differed only in the
+default CPU frequency governor and three options for the left-out memory
+latency driver. [Results and limits](VALIDATION.md) records a build of the
+reconstructed tree.
 
 Tests compile with `tests/harness.h`: failed C assertions retain their stderr
 message and exit with status 134 instead of invoking the system crash handler.

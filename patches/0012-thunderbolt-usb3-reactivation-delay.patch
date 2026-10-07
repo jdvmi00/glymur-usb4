@@ -1,0 +1,64 @@
+Subject: [REVIEW 12/16] Thunderbolt: delay USB3 re-activation when resume discovery tears down an enabled adapter
+
+tb_resume_noirq() waits 500 ms before re-activating USB3 tunnels only when discovery returns a USB3 tunnel. Discovery also disables an enabled USB3 downstream adapter when it cannot follow the whole path, for example when a dock router lost its configuration in sleep, and then returns no tunnel. Re-enabling that adapter before its USB3 link (ULV) has gone down, 40-80 ms on the tested hardware, lost every USB3 device behind the dock. Set the delay whenever an enabled USB3 downstream adapter exists before discovery, which includes the existing case. A bounded wait for ULV to clear could replace the fixed 500 ms. Independent of the rest of the series; the file is otherwise stock 7.3-rc2.
+
+Dependencies: None for building. Patch 16 needs it at runtime for USB3 devices behind a dock to return after docked sleep.
+
+Source attribution: Local change (candidate 1.151) to upstream code by Mika Westerberg, who added the delay in 43bddb26e20a; the adapter timing was measured with the diagnostic candidate 1.150, which is not included. Not posted.
+
+This is a review grouping of preserved source, not a new authorship claim or
+an independently build-validated upstream commit. Original attribution remains
+in the referenced provenance files. No new Signed-off-by trailers are added.
+
+---
+diff --git a/drivers/thunderbolt/tb.c b/drivers/thunderbolt/tb.c
+index 47753a5c0f2ebde1dd4701b3b54e35561bdf0364..12b068a572d53a94345cd56c57f27e29052ab00e 100644
+--- a/drivers/thunderbolt/tb.c
++++ b/drivers/thunderbolt/tb.c
+@@ -3159,6 +3159,26 @@ static void tb_free_unplugged_xdomains(struct tb_switch *sw)
+ 	}
+ }
+ 
++/*
++ * Is a USB3 downstream adapter enabled anywhere below @sw? Tunnel discovery
++ * disables such an adapter also when it cannot follow the whole path (for
++ * example when a device router lost its configuration in sleep), and it
++ * must not be re-enabled before its USB3 link has gone down.
++ */
++static bool tb_switch_usb3_enabled(struct tb_switch *sw)
++{
++	struct tb_port *port;
++
++	tb_switch_for_each_port(sw, port) {
++		if (tb_port_is_usb3_down(port) && tb_usb3_port_is_enabled(port))
++			return true;
++		if (tb_port_has_remote(port) &&
++		    tb_switch_usb3_enabled(port->remote->sw))
++			return true;
++	}
++	return false;
++}
++
+ static int tb_resume_noirq(struct tb *tb)
+ {
+ 	struct tb_cm *tcm = tb_priv(tb);
+@@ -3181,6 +3201,10 @@ static int tb_resume_noirq(struct tb *tb)
+ 	tb_free_unplugged_xdomains(tb->root_switch);
+ 	tb_restore_children(tb->root_switch);
+ 
++	/* Discovery below tears down any enabled USB3 adapter */
++	if (tb_switch_usb3_enabled(tb->root_switch))
++		usb3_delay = 500;
++
+ 	/*
+ 	 * If we get here from suspend to disk the boot firmware or the
+ 	 * restore kernel might have created tunnels of its own. Since
+@@ -3189,8 +3213,6 @@ static int tb_resume_noirq(struct tb *tb)
+ 	 */
+ 	tb_switch_discover_tunnels(tb->root_switch, &tunnels, false);
+ 	list_for_each_entry_safe_reverse(tunnel, n, &tunnels, list) {
+-		if (tb_tunnel_is_usb3(tunnel))
+-			usb3_delay = 500;
+ 		tb_tunnel_deactivate(tunnel);
+ 		tb_tunnel_put(tunnel);
+ 	}

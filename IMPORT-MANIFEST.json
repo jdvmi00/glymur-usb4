@@ -30,11 +30,6 @@
       "source_path": "kernel/checkpoint-1.73/provenance/usb4-candidate-1.70-vs-1.66.diff"
     },
     {
-      "path": "reproduce/expected-source.sha256",
-      "sha256": "cda64b919d39500f5a986bbeb779239805f4ec3723600b7220d9bbe44c25e7b7",
-      "source_path": "kernel/install-candidate-1.89/expected-source.sha256"
-    },
-    {
       "path": "reproduce/baseline/0001-net-smsc95xx-Allow-mac-address-to-be-set-as-a-parame.patch",
       "sha256": "08d6df663c0cccb92c63886a71819dcb1c33e7996d5a54be3d81f46b3d7386a3",
       "source_path": "kernel/linux-aarch64/0001-net-smsc95xx-Allow-mac-address-to-be-set-as-a-parame.patch"
@@ -358,43 +353,79 @@
   "derived_files": [
     {
       "path": "patches/0001-phy-qualcomm-usb4.patch",
-      "sha256": "1d32b76518080eb0fca1492878f62760856e84c246a9f2b1b02d8c9db17d125d"
+      "sha256": "272a9117675c4b38bec473868c0fc32a0470fbee5b81550c33ad34f7133e3baa"
     },
     {
       "path": "patches/0002-clk-qcom-usb4.patch",
-      "sha256": "aef5ebe954518ff2f622c741c3af3734edd0d6eb82772cacd429ca3e169b51ad"
+      "sha256": "16e88c5343f4deecbd5656e42f335e8356195752da10e5a312548d9b25478d4d"
     },
     {
       "path": "patches/0003-thunderbolt-shared-host.patch",
-      "sha256": "83bb6b6c457943d5959d9adb0f2d776b8ac7a38d5d2924d7712895da5803938d"
+      "sha256": "866d3e7ad0411c62bb4eb64ff43af79da70322145d947355e0ec34ef4650d647"
     },
     {
       "path": "patches/0004-usb-qcom-glink-dock.patch",
-      "sha256": "34d75049b767608128722da0684dda209906e7215027f9fef4548dfc2208470e"
+      "sha256": "b03cba1391a01c0765db7a155daa63ce7f5aa71a3ce32990d9aec3ff16268c96"
     },
     {
       "path": "patches/0005-thunderbolt-qcom-router.patch",
-      "sha256": "867f946c1e6d1a077f0d31eae49ef6f41202414b542fd7bd831b5f285c997136"
+      "sha256": "cf495b450ec950c3c2af12a8b9372bc9f9a7183a5203568c1445f3428aa7b198"
     },
     {
       "path": "patches/0006-drm-msm-dpu-routing-dsc.patch",
-      "sha256": "766fee072ddd1b3ce4957a39353234b6b47e46832c535ea71d8f89cdb56278bc"
+      "sha256": "e5b05941df7850090d3e2dccddeb79fe6ca5b2952ac940bc07d7f7fc4a34632d"
     },
     {
       "path": "patches/0007-drm-msm-dp-tunneling.patch",
-      "sha256": "569786e234e7cdd4f6feb87b4126af706289e81485024e7ff4728c1418865d36"
+      "sha256": "5ecbf8bc4643335f2091935a3d94514a768c0294a6b89f7d8bf8989ee1d58f7a"
     },
     {
       "path": "patches/0008-arm64-dts-qcom-usb4.patch",
-      "sha256": "31adb8f6d476744a847b952b128477fbe50eefecfa190f36e7d412f1ed1dd524"
+      "sha256": "a3e94aa4ca44a729ed2b2c3c2e795227203878d2d6427465258204df5c37fc18"
     },
     {
       "path": "patches/0009-arm64-dts-surface-usb4.patch",
-      "sha256": "1ccbbed2c35f7edd5cb473b96bd97697cd50fbb67640bc0bd7bd12b068eb2f6d"
+      "sha256": "35fcb5b37d4ba3e6d78c7114886422bd6762d05d21d9c8c37eb59a514f91e831"
+    },
+    {
+      "path": "patches/0010-phy-qcom-qmp-combo-usb4-sleep-clamp.patch",
+      "sha256": "f8a8c5ac3d8e4fd332802be9d8b13ad3061dbdf048afe8f57822634167ed6ee4"
+    },
+    {
+      "path": "patches/0011-clk-qcom-glymur-usb4-wakeup-path.patch",
+      "sha256": "a32d998724bad870f3ea8163748bc24a165bf98b126702162fee6d44e5f3713f"
+    },
+    {
+      "path": "patches/0012-thunderbolt-usb3-reactivation-delay.patch",
+      "sha256": "42a63923dabc684d9ad5e7321a5a1d41e000e5592d7f198ca430b6cfa0f4789c"
+    },
+    {
+      "path": "patches/0013-usb-dwc3-qcom-vbus-override-in-sleep.patch",
+      "sha256": "915ef22ec43a6cf4684d49ad57be494483bfefb4294037943e56d9056d5c04d3"
+    },
+    {
+      "path": "patches/0014-usb-dwc3-usb4-tunnel-sleep.patch",
+      "sha256": "1d66513c1eb2e0935bc6465dcf82f1faffa5695f160987a238d1a85c8ff19a62"
+    },
+    {
+      "path": "patches/0015-drm-msm-dpu-usb4-route-cache.patch",
+      "sha256": "bb2411579547a83d77fcfadd93d47b02cfefe15448c726f35c919c63f70b3a35"
+    },
+    {
+      "path": "patches/0016-thunderbolt-qcom-router-sleep.patch",
+      "sha256": "fa7e5e195abd151de5fe744b0e72f51761e464716b6d617823a75b0fcca0ff35"
     },
     {
       "path": "patches/series",
-      "sha256": "1b29c629cabb9adf47b78bad4580515838772849dcafc81f28963660df9211ad"
+      "sha256": "0f493169d02046313f1fbac8afcebc9186fb9d264c9df593ce641d0cefbb5762"
+    },
+    {
+      "path": "reproduce/expected-source.sha256",
+      "sha256": "7b71bedd571e11497e428f446b6c6c657c6e449a9ea28654dc90d1c83e3caece",
+      "source_path": "kernel/install-candidate-1.151/expected-source.sha256",
+      "source_sha256": "bd76ffa6d8e5bccb4fd88f61d6d512290075306144ad255eb00bf418ef1fcf55",
+      "source_commit": "87d851a6891772d7ed15a08e0449b77a12a78356",
+      "change": "Lines of the 1.151 source manifest, in its order, for the 98 files the 1.89 or 1.151 series touches. Five of them (see update_1_151.mixed_paths in provenance/derivation.json) also carry out-of-scope 1.151 changes; their lines record the series result instead."
     },
     {
       "path": "tests/test-dpu-plane-split-reset.py",

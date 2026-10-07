@@ -1,0 +1,56 @@
+Subject: [REVIEW 10/16] QMP combo PHY: clamp the USB4 outputs across system sleep
+
+A USB4 router kept across s2idle (patch 16) leaves the combo PHY initialized and powered while the router MCU is halted. While the PHY is in USB4 mode, its system-sleep callbacks now clear CLAMP_EN in the USB4 always-on clamp register at suspend, which engages the I/O clamp as the USB3 path does for autonomous mode, and set it again at resume. The vendor driver does the same around standby. The router is a consumer of the PHY, so its own callbacks run before these at suspend and after them at resume.
+
+Dependencies: Patch 01 (USB4 mode and register layout). Used by patch 16.
+
+Source attribution: Local Surface change (candidate 1.142; the experiments from 1.134 wrote the same register directly). The standby sequence was determined from static analysis of Qualcomm's Windows USB4 filter driver; no vendor code is included.
+
+This is a review grouping of preserved source, not a new authorship claim or
+an independently build-validated upstream commit. Original attribution remains
+in the referenced provenance files. No new Signed-off-by trailers are added.
+
+---
+diff --git a/drivers/phy/qualcomm/phy-qcom-qmp-combo.c b/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
+index c532584de3e4f1772d9d89df2d3071fe16b7c103..d4fe4be556a13dec8b230dfa8b8c31cbc6b4c2e9 100644
+--- a/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
++++ b/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
+@@ -5386,7 +5386,38 @@ static int __maybe_unused qmp_combo_runtime_resume(struct device *dev)
+ 	return 0;
+ }
+ 
++/*
++ * A USB4 router kept across system suspend leaves the PHY initialized and
++ * powered while its MCU is halted. Clamp the USB4 outputs meanwhile, as the
++ * vendor driver does; the router's callbacks run before ours on suspend and
++ * after ours on resume.
++ */
++static int __maybe_unused qmp_combo_suspend(struct device *dev)
++{
++	struct qmp_combo *qmp = dev_get_drvdata(dev);
++
++	guard(mutex)(&qmp->phy_mutex);
++	if (qmp->usb4_init_count && qmp->pcs_aon &&
++	    qmp->cfg->regs[QPHY_PCS_USB4_CLAMP_ENABLE])
++		qphy_clrbits(qmp->pcs_aon, qmp->cfg->regs[QPHY_PCS_USB4_CLAMP_ENABLE],
++			     CLAMP_EN);
++	return 0;
++}
++
++static int __maybe_unused qmp_combo_resume(struct device *dev)
++{
++	struct qmp_combo *qmp = dev_get_drvdata(dev);
++
++	guard(mutex)(&qmp->phy_mutex);
++	if (qmp->usb4_init_count && qmp->pcs_aon &&
++	    qmp->cfg->regs[QPHY_PCS_USB4_CLAMP_ENABLE])
++		qphy_setbits(qmp->pcs_aon, qmp->cfg->regs[QPHY_PCS_USB4_CLAMP_ENABLE],
++			     CLAMP_EN);
++	return 0;
++}
++
+ static const struct dev_pm_ops qmp_combo_pm_ops = {
++	SET_SYSTEM_SLEEP_PM_OPS(qmp_combo_suspend, qmp_combo_resume)
+ 	SET_RUNTIME_PM_OPS(qmp_combo_runtime_suspend,
+ 			   qmp_combo_runtime_resume, NULL)
+ };

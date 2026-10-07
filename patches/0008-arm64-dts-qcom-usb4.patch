@@ -1,6 +1,6 @@
-Subject: [REVIEW 08/09] Qualcomm SoC USB4 descriptions
+Subject: [REVIEW 08/16] Qualcomm SoC USB4 descriptions
 
-Add the shared Glymur/Hamoa PHY/router description changes needed by the tested topology. Review clock, reset, interconnect and endpoint contracts against the drivers.
+Add the shared Glymur/Hamoa PHY/router description changes needed by the tested topology. Set snps,dis-del-phy-power-chg-quirk on the three Glymur Type-C controllers: with GUSB3PIPECTL.DEPOCHANGE set, a USB3 link tunnelled over USB4 could not leave U2 or U3 again. Qualcomm's Windows driver clears it on these controllers. Review clock, reset, interconnect and endpoint contracts against the drivers.
 
 Dependencies: Patches 01-07 provide the referenced interfaces. Shared SoC placement does not establish testing on other boards.
 
@@ -12,7 +12,7 @@ in the referenced provenance files. No new Signed-off-by trailers are added.
 
 ---
 diff --git a/arch/arm64/boot/dts/qcom/glymur.dtsi b/arch/arm64/boot/dts/qcom/glymur.dtsi
-index fbbc82550c442568a6c9ad7b85edaa47ac4b291c..91d243559d351ed5e34b48fc615827c3e25dbe12 100644
+index fbbc82550c442568a6c9ad7b85edaa47ac4b291c..a907cda213cf1f42c725a5900168a4dee04c3ad1 100644
 --- a/arch/arm64/boot/dts/qcom/glymur.dtsi
 +++ b/arch/arm64/boot/dts/qcom/glymur.dtsi
 @@ -2517,11 +2517,13 @@
@@ -47,6 +47,30 @@ index fbbc82550c442568a6c9ad7b85edaa47ac4b291c..91d243559d351ed5e34b48fc615827c3
  
  			power-domains = <&gcc GCC_USB_1_PHY_GDSC>;
  
+@@ -4614,6 +4618,7 @@
+ 			tx-fifo-resize;
+ 			snps,dis_u2_susphy_quirk;
+ 			snps,dis_enblslpm_quirk;
++			snps,dis-del-phy-power-chg-quirk;
+ 
+ 			usb-role-switch;
+ 			wakeup-source;
+@@ -4702,6 +4707,7 @@
+ 			tx-fifo-resize;
+ 			snps,dis_u2_susphy_quirk;
+ 			snps,dis_enblslpm_quirk;
++			snps,dis-del-phy-power-chg-quirk;
+ 
+ 			usb-role-switch;
+ 			wakeup-source;
+@@ -4790,6 +4796,7 @@
+ 			tx-fifo-resize;
+ 			snps,dis_u2_susphy_quirk;
+ 			snps,dis_enblslpm_quirk;
++			snps,dis-del-phy-power-chg-quirk;
+ 
+ 			usb-role-switch;
+ 			wakeup-source;
 diff --git a/arch/arm64/boot/dts/qcom/hamoa.dtsi b/arch/arm64/boot/dts/qcom/hamoa.dtsi
 index 8a96ea1bdb9c4c409b2af997680d8c13fed0643e..17a7fbaaedc00a5a0c8ff55c99836bbbacacf0da 100644
 --- a/arch/arm64/boot/dts/qcom/hamoa.dtsi

@@ -155,7 +155,7 @@
   "results": [
     {
       "path": "patches/0001-phy-qualcomm-usb4.patch",
-      "sha256": "1d32b76518080eb0fca1492878f62760856e84c246a9f2b1b02d8c9db17d125d",
+      "sha256": "272a9117675c4b38bec473868c0fc32a0470fbee5b81550c33ad34f7133e3baa",
       "affected_paths": [
         "drivers/phy/qualcomm/phy-qcom-qmp-combo.c",
         "drivers/phy/qualcomm/phy-qcom-qmp-glymur-usb4-tables.h",
@@ -166,11 +166,11 @@
         "include/linux/phy/phy-thunderbolt.h",
         "include/linux/phy/phy.h"
       ],
-      "dependencies": "Base prerequisites. Used by patches 04 and 05."
+      "dependencies": "Base prerequisites. Used by patches 04, 05, 10 and 16."
     },
     {
       "path": "patches/0002-clk-qcom-usb4.patch",
-      "sha256": "aef5ebe954518ff2f622c741c3af3734edd0d6eb82772cacd429ca3e169b51ad",
+      "sha256": "16e88c5343f4deecbd5656e42f335e8356195752da10e5a312548d9b25478d4d",
       "affected_paths": [
         "drivers/clk/qcom/dispcc-glymur.c",
         "drivers/clk/qcom/gcc-glymur.c",
@@ -178,44 +178,42 @@
         "include/dt-bindings/clock/qcom,glymur-gcc.h",
         "include/linux/soc/qcom/glymur-usb4.h"
       ],
-      "dependencies": "Base prerequisites. Used by patches 05 and 07."
+      "dependencies": "Base prerequisites. Used by patches 05, 07, 11 and 16."
     },
     {
       "path": "patches/0003-thunderbolt-shared-host.patch",
-      "sha256": "83bb6b6c457943d5959d9adb0f2d776b8ac7a38d5d2924d7712895da5803938d",
+      "sha256": "866d3e7ad0411c62bb4eb64ff43af79da70322145d947355e0ec34ef4650d647",
       "affected_paths": [
         "drivers/thunderbolt/ctl.c",
         "drivers/thunderbolt/icm.c",
         "drivers/thunderbolt/nhi.c",
         "drivers/thunderbolt/nhi.h",
         "drivers/thunderbolt/pci.c",
-        "drivers/thunderbolt/tb.c",
-        "drivers/thunderbolt/tb.h",
-        "drivers/thunderbolt/usb4.c",
         "include/linux/thunderbolt.h"
       ],
-      "dependencies": "Base prerequisites for the shared transport. Required by patch 05. The CONFIG_USB4_QCOM-guarded code references qcom_usb4_host_driver, qcom_usb4_dp_driver and the router frontend defined in patch 05, so the tested configuration needs 05 to link."
+      "dependencies": "Base prerequisites for the shared transport. Required by patch 05. The CONFIG_USB4_QCOM-guarded registration references qcom_usb4_host_driver and qcom_usb4_dp_driver, defined in patch 05, so the tested configuration needs 05 to link."
     },
     {
       "path": "patches/0004-usb-qcom-glink-dock.patch",
-      "sha256": "34d75049b767608128722da0684dda209906e7215027f9fef4548dfc2208470e",
+      "sha256": "b03cba1391a01c0765db7a155daa63ce7f5aa71a3ce32990d9aec3ff16268c96",
       "affected_paths": [
         "drivers/soc/qcom/pmic_glink_altmode.c",
         "drivers/usb/core/hub.c",
+        "drivers/usb/dwc3/core.c",
         "drivers/usb/dwc3/core.h",
+        "drivers/usb/dwc3/dwc3-qcom.c",
+        "drivers/usb/dwc3/glue.h",
         "drivers/usb/dwc3/host.c",
         "drivers/usb/host/xhci-hub.c",
         "drivers/usb/host/xhci-plat.c",
         "drivers/usb/host/xhci-plat.h",
-        "drivers/usb/host/xhci.c",
-        "drivers/usb/host/xhci.h",
-        "include/linux/usb/quirks.h"
+        "drivers/usb/host/xhci.h"
       ],
-      "dependencies": "Base prerequisites; this patch references no symbols from patch 01. The validated USB4 mode messages are consumed by the Type-C handling in patch 05, which drives the PHY from patch 01."
+      "dependencies": "Base prerequisites; this patch references no symbols from patch 01. The validated USB4 mode messages are consumed by the Type-C handling in patch 05, which drives the PHY from patch 01. Patches 13 and 14 change the DWC3 files further."
     },
     {
       "path": "patches/0005-thunderbolt-qcom-router.patch",
-      "sha256": "867f946c1e6d1a077f0d31eae49ef6f41202414b542fd7bd831b5f285c997136",
+      "sha256": "cf495b450ec950c3c2af12a8b9372bc9f9a7183a5203568c1445f3428aa7b198",
       "affected_paths": [
         "drivers/thunderbolt/Kconfig",
         "drivers/thunderbolt/Makefile",
@@ -246,7 +244,7 @@
     },
     {
       "path": "patches/0006-drm-msm-dpu-routing-dsc.patch",
-      "sha256": "766fee072ddd1b3ce4957a39353234b6b47e46832c535ea71d8f89cdb56278bc",
+      "sha256": "e5b05941df7850090d3e2dccddeb79fe6ca5b2952ac940bc07d7f7fc4a34632d",
       "affected_paths": [
         "drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_12_2_glymur.h",
         "drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c",
@@ -268,14 +266,16 @@
         "drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h",
         "drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c",
         "drivers/gpu/drm/msm/disp/dpu1/dpu_rm.c",
+        "drivers/gpu/drm/msm/msm_atomic.c",
         "drivers/gpu/drm/msm/msm_drv.h",
+        "drivers/gpu/drm/msm/msm_kms.c",
         "drivers/gpu/drm/msm/msm_kms.h"
       ],
-      "dependencies": "Base prerequisites. Supplies the DPU side of patch 07; evaluated with the complete host/display stack."
+      "dependencies": "Base prerequisites. Supplies the DPU and KMS side of patch 07; evaluated with the complete host/display stack."
     },
     {
       "path": "patches/0007-drm-msm-dp-tunneling.patch",
-      "sha256": "569786e234e7cdd4f6feb87b4126af706289e81485024e7ff4728c1418865d36",
+      "sha256": "5ecbf8bc4643335f2091935a3d94514a768c0294a6b89f7d8bf8989ee1d58f7a",
       "affected_paths": [
         "drivers/gpu/drm/display/drm_dp_helper.c",
         "drivers/gpu/drm/msm/dp/dp_aux.c",
@@ -290,11 +290,11 @@
         "drivers/gpu/drm/msm/dp/dp_utils.c",
         "drivers/gpu/drm/msm/dp/dp_utils.h"
       ],
-      "dependencies": "Patch 05 supplies the usb4-dp.h provider interface and patch 06 the DPU side. Patch 02 is a runtime dependency rather than a symbol reference: dp_ctrl.c sets the DP input link clock rate, which needs the writable dispcc divider from 02 through the board clock bindings in 08-09. Patches 05-07 form a coupled host/display integration, not independently validated features."
+      "dependencies": "Patch 05 supplies the usb4-dp.h provider interface and patch 06 the DPU and KMS side. Patch 02 is a runtime dependency rather than a symbol reference: dp_ctrl.c sets the DP input link clock rate, which needs the writable dispcc divider from 02 through the board clock bindings in 08-09. Patches 05-07 form a coupled host/display integration, not independently validated features."
     },
     {
       "path": "patches/0008-arm64-dts-qcom-usb4.patch",
-      "sha256": "31adb8f6d476744a847b952b128477fbe50eefecfa190f36e7d412f1ed1dd524",
+      "sha256": "a3e94aa4ca44a729ed2b2c3c2e795227203878d2d6427465258204df5c37fc18",
       "affected_paths": [
         "arch/arm64/boot/dts/qcom/glymur.dtsi",
         "arch/arm64/boot/dts/qcom/hamoa.dtsi"
@@ -303,11 +303,73 @@
     },
     {
       "path": "patches/0009-arm64-dts-surface-usb4.patch",
-      "sha256": "1ccbbed2c35f7edd5cb473b96bd97697cd50fbb67640bc0bd7bd12b068eb2f6d",
+      "sha256": "35fcb5b37d4ba3e6d78c7114886422bd6762d05d21d9c8c37eb59a514f91e831",
       "affected_paths": [
         "arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts"
       ],
       "dependencies": "Patches 01-08 and the preserved Surface 1.17 prerequisites. Do not use this device tree for another board."
+    },
+    {
+      "path": "patches/0010-phy-qcom-qmp-combo-usb4-sleep-clamp.patch",
+      "sha256": "f8a8c5ac3d8e4fd332802be9d8b13ad3061dbdf048afe8f57822634167ed6ee4",
+      "affected_paths": [
+        "drivers/phy/qualcomm/phy-qcom-qmp-combo.c"
+      ],
+      "dependencies": "Patch 01 (USB4 mode and register layout). Used by patch 16."
+    },
+    {
+      "path": "patches/0011-clk-qcom-glymur-usb4-wakeup-path.patch",
+      "sha256": "a32d998724bad870f3ea8163748bc24a165bf98b126702162fee6d44e5f3713f",
+      "affected_paths": [
+        "drivers/clk/qcom/gcc-glymur.c"
+      ],
+      "dependencies": "Patch 02 (same file). Used by patch 16."
+    },
+    {
+      "path": "patches/0012-thunderbolt-usb3-reactivation-delay.patch",
+      "sha256": "42a63923dabc684d9ad5e7321a5a1d41e000e5592d7f198ca430b6cfa0f4789c",
+      "affected_paths": [
+        "drivers/thunderbolt/tb.c"
+      ],
+      "dependencies": "None for building. Patch 16 needs it at runtime for USB3 devices behind a dock to return after docked sleep."
+    },
+    {
+      "path": "patches/0013-usb-dwc3-qcom-vbus-override-in-sleep.patch",
+      "sha256": "915ef22ec43a6cf4684d49ad57be494483bfefb4294037943e56d9056d5c04d3",
+      "affected_paths": [
+        "drivers/usb/dwc3/dwc3-qcom.c"
+      ],
+      "dependencies": "Applies to the dwc3-qcom.c of patch 04; the hunks change only stock code paths (probe, suspend, resume and the role notifier)."
+    },
+    {
+      "path": "patches/0014-usb-dwc3-usb4-tunnel-sleep.patch",
+      "sha256": "1d66513c1eb2e0935bc6465dcf82f1faffa5695f160987a238d1a85c8ff19a62",
+      "affected_paths": [
+        "drivers/usb/dwc3/core.c",
+        "drivers/usb/dwc3/core.h",
+        "drivers/usb/dwc3/host.c"
+      ],
+      "dependencies": "Patch 04 (DWC3 files, CIO register definitions) and the usb4-host-interface property from patches 08-09. Used by patch 16, which adds the matching link from the router to the controller."
+    },
+    {
+      "path": "patches/0015-drm-msm-dpu-usb4-route-cache.patch",
+      "sha256": "bb2411579547a83d77fcfadd93d47b02cfefe15448c726f35c919c63f70b3a35",
+      "affected_paths": [
+        "drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c"
+      ],
+      "dependencies": "Patch 06 (same file). Used by patch 16."
+    },
+    {
+      "path": "patches/0016-thunderbolt-qcom-router-sleep.patch",
+      "sha256": "fa7e5e195abd151de5fe744b0e72f51761e464716b6d617823a75b0fcca0ff35",
+      "affected_paths": [
+        "drivers/thunderbolt/qcom-usb4-dp.c",
+        "drivers/thunderbolt/qcom-usb4-dp.h",
+        "drivers/thunderbolt/qcom-usb4-host.c",
+        "drivers/thunderbolt/qcom-usb4-startup.c",
+        "drivers/thunderbolt/qcom-usb4-startup.h"
+      ],
+      "dependencies": "Patches 01-09 for the code it changes. At runtime it relies on 10 (USB4 clamp), 11 (power domains kept on), 12 (USB3 devices return after docked sleep), 14 (DWC3 core kept and device-link ordering) and 15 (DP release in the late sleep phase). Patch 13 is independent of it."
     }
   ],
   "update_1_89": {
@@ -340,5 +402,467 @@
       "drivers/thunderbolt/qcom-usb4-nhi.h"
     ],
     "method": "Apply the four candidate diffs to the verified 1.85 source. For each changed file, replace its complete section in patches 01, 05 and 07 with a diff from the review baseline to the 1.89 file (git diff --full-index --diff-algorithm=histogram, a/ b/ prefixes, no diff drivers). The same command reproduces every 1.85 section of those files byte for byte. Other files and patches are unchanged."
+  },
+  "update_1_151": {
+    "source_commit": "87d851a6891772d7ed15a08e0449b77a12a78356",
+    "tested_kernel": "Surface candidate 1.151, the installed default kernel on the tested Surface Laptop 8 since 5 October 2026",
+    "source_manifest": {
+      "path": "kernel/install-candidate-1.151/expected-source.sha256",
+      "sha256": "bd76ffa6d8e5bccb4fd88f61d6d512290075306144ad255eb00bf418ef1fcf55"
+    },
+    "inputs": [
+      {
+        "candidate": "1.90",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.90-vs-1.89.diff",
+        "sha256": "a8a0401f9b5f7043bcfde83d24e8604bb1695cb5ace179ce2891833f4a8514d5",
+        "scope": "mixed",
+        "change": "Router powered only while it runs and stopped around system sleep; USB GDSC retention (in). qrtr HELLO resend on MHI resume, Wi-Fi (out)."
+      },
+      {
+        "candidate": "1.91",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.91-vs-1.90.diff",
+        "sha256": "787b9920cc34b88314690bbe286738d7f58daba94c04e19bb7858d0c3e19bbe8",
+        "scope": "in",
+        "change": "Router block reset released before its power domain goes off."
+      },
+      {
+        "candidate": "1.92",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.92-vs-1.91.diff",
+        "sha256": "31abef299170c8c39bfc67be4776134aa61bfbc6dd839d89f7622866839abfcf",
+        "scope": "out",
+        "change": "GMU driver (Akhil P Oommen RFT series), crypto node disabled; schedutil in the configuration."
+      },
+      {
+        "candidate": "1.93",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.93-vs-1.92.diff",
+        "sha256": "a5eb99a842b5ab4f29201cf9d8d310054f810a03222c0e6422ec1c9893463f86",
+        "scope": "in",
+        "change": "USB4 AON toggle restored when USB4 releases the combo PHY; dwc3-qcom guards a missing xHCI hcd."
+      },
+      {
+        "candidate": "1.94",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.94-vs-1.93.diff",
+        "sha256": "dbfe87b2e12dbb5d9a416662f6510c54bf61b24f566e1cf43bea1db65277a9b6",
+        "scope": "out",
+        "change": "Lid switch; WCN7850 Bluetooth subsystem ID."
+      },
+      {
+        "candidate": "1.95",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.95-vs-1.94.diff",
+        "sha256": "8812d186c8c1b9716208abb705b19f75534862baeb4af00c2bbc98370bee6d99",
+        "scope": "mixed",
+        "change": "DP power-on refused in USB3-only mode (in). ath12k firmware MAC, wifi@0 node, hci_qca M.2 power (out)."
+      },
+      {
+        "candidate": "1.96",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.96-vs-1.95.diff",
+        "sha256": "0b7145d4b996586d55612aa695dfa7eaf41050edea13eb1781f7426072e886c1",
+        "scope": "in",
+        "change": "Router starts runtime-active so its idle drops the CX vote."
+      },
+      {
+        "candidate": "1.97",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.97-vs-1.96.diff",
+        "sha256": "c828d1eb23c4dc76b243a947e794996b3944ce26519b1646b8856c1f8f0bedbd",
+        "scope": "out",
+        "change": "Bluetooth address from the M.2 connector; touchscreen and touchpad power."
+      },
+      {
+        "candidate": "1.98",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.98-vs-1.97.diff",
+        "sha256": "a59c69020c58bbbdbea9a894eb88f8d0a206b750aa7c2af12352329d1bf9acee",
+        "scope": "out",
+        "change": "Touchpad power-on delay."
+      },
+      {
+        "candidate": "1.99",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.99-vs-1.98.diff",
+        "sha256": "46f0f900169b76df0489d4c9c3ce1d2d27c90380d9eb34842921a11db5bb45e4",
+        "scope": "out",
+        "change": "Platform profiles without ACPI."
+      },
+      {
+        "candidate": "1.100",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.100-vs-1.99.diff",
+        "sha256": "ce38485c354e6d64a99300dbf4afb4b7806227169711a1192fd8b38001af390b",
+        "scope": "out",
+        "change": "Mahua CRD PHY/TCSR supplies and lid wake edges (board DT); RPMh enable state; SCMI memlat and ADSP SMMU IDs (glymur.dtsi, devfreq, SCMI)."
+      },
+      {
+        "candidate": "1.102",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.102-vs-1.101.diff",
+        "sha256": "eb4900a64b2786b54dda677e5f541e674fb65618627273d2f60771c5b0e344f0",
+        "scope": "in",
+        "change": "dwc3-qcom: the xHCI no longer initializes the PHYs (xhci-skip-phy-init-quirk)."
+      },
+      {
+        "candidate": "1.103",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.103-vs-1.102.diff",
+        "sha256": "3600bd3b48f8c134683105b212ce316ddfd924a22261027cf6d2a86f0fce3932",
+        "scope": "in",
+        "change": "qmp-combo registers its clocks before enabling runtime PM."
+      },
+      {
+        "candidate": "1.104",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.104-vs-1.103.diff",
+        "sha256": "8310d9f637cda62deee1cfbf8f65cd97898e6f3c2909174468ad71b21494f59f",
+        "scope": "in",
+        "change": "qmp-combo refuses runtime suspend until the USB PHY is powered on."
+      },
+      {
+        "candidate": "1.105",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.105-vs-1.104.diff",
+        "sha256": "444462265636430680e06a0efeccaac37a3770755aced23adc2d0b6b1f0efbde",
+        "scope": "in",
+        "change": "dwc3 sets the PHY host mode before creating the xHCI on a role switch."
+      },
+      {
+        "candidate": "1.106",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.106-vs-1.105.diff",
+        "sha256": "9aa424bb128922befb584df05207cf6c664ae36ff55de1067ad73864f66a1b15",
+        "scope": "out",
+        "change": "qmp-usb pipe clock (USB-A), Surface platform profile, panel-edp entry, eUSB2 repeater leakage fix (Krishna Kurapati)."
+      },
+      {
+        "candidate": "1.107",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.107-vs-1.106.diff",
+        "sha256": "2094a045cf0774453fb6ebf4970f2769c2af29e93e64f853672a1843fe121cda",
+        "scope": "out",
+        "change": "PCI host-common D3cold with bridge wakeup."
+      },
+      {
+        "candidate": "1.109",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.109-vs-1.107.diff",
+        "sha256": "31962a43df568bd3b3acc99d7e383cbf948f403b10ef0ec13a4df916d2ff7e11",
+        "scope": "out",
+        "change": "SSD 3.3 V supply (board DT)."
+      },
+      {
+        "candidate": "1.113",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.113-vs-1.109.diff",
+        "sha256": "f345a72a5ac7f1bd80398be48531bcda398ac81d14aed067e477917e501aad9c",
+        "scope": "out",
+        "change": "DPU core clock per layer mixer (dpu_core_perf.c, dpu_plane.c); PMK8850 PWM and PWM backlight; baseline patch 0010 no longer applied."
+      },
+      {
+        "candidate": "1.114",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.114-vs-1.113.diff",
+        "sha256": "ee19269215c017a5de609e59a64d5714c7a00e626dfacb0bb46e9f3d274490c2",
+        "scope": "superseded",
+        "change": "Dock reconnect diagnostics (removed again in 1.122)."
+      },
+      {
+        "candidate": "1.115",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.115-vs-1.114.diff",
+        "sha256": "5fd85700cdf27981ec5f343b96e115a647e8d29aba5b3fcaa505e351288092b9",
+        "scope": "superseded",
+        "change": "Pending wake-event diagnostics (removed again in 1.122)."
+      },
+      {
+        "candidate": "1.116",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.116-vs-1.115.diff",
+        "sha256": "7af817d5bc3320093dd4762d47ce9fd92892c111a3beb142e7b2788d13b00a9e",
+        "scope": "in",
+        "change": "dwc3-qcom prepares the connection wake triggers before a new host starts."
+      },
+      {
+        "candidate": "1.117",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.117-vs-1.116.diff",
+        "sha256": "f5388510b24cdd70536cda6e6a60f8a1d5c16bf4b34a8c1009c3f93f7e2a116b",
+        "scope": "in",
+        "change": "dwc3-qcom keeps the firmware trigger policy for the first host."
+      },
+      {
+        "candidate": "1.118",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.118-vs-1.117.diff",
+        "sha256": "d563409f6ca42681596aa96bb9f7dd9bb2a70317dd20dabfbaabe4a0e119e3ef",
+        "scope": "in",
+        "change": "Display state saved and stopped before the router stops for sleep, restored after it returns."
+      },
+      {
+        "candidate": "1.119",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.119-vs-1.118.diff",
+        "sha256": "dcdcf376b7af3d6eadb62dd20ea43f2c8a59f800961ba99389651494a97468b2",
+        "scope": "in",
+        "change": "Manual router, register, DP resource and tunnel controls removed."
+      },
+      {
+        "candidate": "1.120",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.120-vs-1.119.diff",
+        "sha256": "b7a0677633b86b2537baab0afaf8d40a0b0f099800fed91e3099492311586bfe",
+        "scope": "in",
+        "change": "26 experiment parameters removed; routine tracing moved to debug messages."
+      },
+      {
+        "candidate": "1.121",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.121-vs-1.120.diff",
+        "sha256": "118d95621acd3de7493d5e87b165a20f36376741ca934547a88b7ab05c280a80",
+        "scope": "in",
+        "change": "Temporary status views and diagnostic AUX status reads removed."
+      },
+      {
+        "candidate": "1.122",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.122-vs-1.121.diff",
+        "sha256": "990cea8b7e8b8ab9c49c57ace5133931060428c7267224f0157122ad2dd46f81",
+        "scope": "in",
+        "change": "tb.c, switch.c and usb4.c back to stock; remaining dwc3-qcom and pmic_glink_altmode diagnostics removed."
+      },
+      {
+        "candidate": "1.123",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.123-vs-1.122.diff",
+        "sha256": "33e50fd292d3f9adc3b757a71ad6e4ccfbfef26efaae964c3bf2cfc26f17431b",
+        "scope": "in",
+        "change": "September USB3 link power policy removed (the failure it covered reproduced; replaced by 1.127-1.130)."
+      },
+      {
+        "candidate": "1.124",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.124-vs-1.123.diff",
+        "sha256": "d41eccc82d9fdbd23718f03b326643203beb8ef24ab6607868fad482bd52c3cc",
+        "scope": "superseded",
+        "change": "Experiment: no U1/U2 on the tunnelled root link."
+      },
+      {
+        "candidate": "1.125",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.125-vs-1.124.diff",
+        "sha256": "34f6ea1416b1c82d7bf1be0b928dd36faee988564f6f4096841c7f597c53a6df",
+        "scope": "superseded",
+        "change": "Interim tunnelled-link-only policy."
+      },
+      {
+        "candidate": "1.126",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.126-vs-1.125.diff",
+        "sha256": "e9a1b0eeb32a81a75aaf597277d11074d8d95990bce0c0757a65b30fcf16926f",
+        "scope": "superseded",
+        "change": "Experiment: U1 refused in usb_enable_link_state()."
+      },
+      {
+        "candidate": "1.127",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.127-vs-1.126.diff",
+        "sha256": "d4d4a9217adb3c5f59555dfbf248290ef0f7fae5a4a249f04de53411117acab5",
+        "scope": "in",
+        "change": "U1 skipped on USB3 links tunnelled over USB4 (USB4 v2.0 section 9.2.1.1); U2 kept."
+      },
+      {
+        "candidate": "1.128",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.128-vs-1.127.diff",
+        "sha256": "fcbdb8234a0490b4ecf9f12692efdae0099a7a5f8646cfaca886a9f426b7ecb4",
+        "scope": "superseded",
+        "change": "Experiment: DEPOCHANGE cleared in C (replaced by the 1.130 device-tree property)."
+      },
+      {
+        "candidate": "1.129",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.129-vs-1.128.diff",
+        "sha256": "77c1ad14d619dc3f100ed705595b15288b76961d0568a212448979a5c23c8d8e",
+        "scope": "in",
+        "change": "Interim runtime-suspend opt-out removed; xhci.c and usb/quirks.h back to stock."
+      },
+      {
+        "candidate": "1.130",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.130-vs-1.129.diff",
+        "sha256": "e931ca3765095f44915ee239cac00c69546b874a06ac7dfc53ad57c3f9da7a91",
+        "scope": "in",
+        "change": "DEPOCHANGE cleared through snps,dis-del-phy-power-chg-quirk on the Glymur Type-C controllers."
+      },
+      {
+        "candidate": "1.131",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.131-vs-1.130.diff",
+        "sha256": "f8420ffd33ee32c7bd2feeb89408054b7d3b7ba8401ec3769bb91cfa057859d0",
+        "scope": "in",
+        "change": "Experiment: connected router kept across s2idle; router/PHY domains on the wakeup path (kept in 1.142)."
+      },
+      {
+        "candidate": "1.132",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.132-vs-1.131.diff",
+        "sha256": "676b4c1e48a605b51791e51dd54d5685e4b2aed9e372686e2b6ac6ee2ce01d8f",
+        "scope": "superseded",
+        "change": "Experiment: firmware resume command."
+      },
+      {
+        "candidate": "1.133",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.133-vs-1.132.diff",
+        "sha256": "0679ab0b0d563e69bbb4cf7848115450d1047d796f5484fc57cc2d3394b5f3be",
+        "scope": "superseded",
+        "change": "Experiment: firmware stop after router sleep."
+      },
+      {
+        "candidate": "1.134",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.134-vs-1.133.diff",
+        "sha256": "3200185e3515517d175335db190b441155a5d3230592f7a5451f163990e6591e",
+        "scope": "superseded",
+        "change": "Experiment: MCU halt and warm restart (clean form in 1.142)."
+      },
+      {
+        "candidate": "1.135",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.135-vs-1.134.diff",
+        "sha256": "b268f8a109e05875baf7f10b6d6c4b252f25b9380d7b22a7ec17f950d2733f74",
+        "scope": "superseded",
+        "change": "Experiment: xHCI reset-on-resume."
+      },
+      {
+        "candidate": "1.136",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.136-vs-1.135.diff",
+        "sha256": "fbdbac6798cb3857402a23d9e4a8ec8141c8160723f02b1c5e0047e4eca0c6cc",
+        "scope": "superseded",
+        "change": "Experiment: warm restart without the partial block reset."
+      },
+      {
+        "candidate": "1.137",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.137-vs-1.136.diff",
+        "sha256": "6ddbf252809447fb2c1b5aafac15d39bf32a04e022ed383fe5753e92ae3acb33",
+        "scope": "in",
+        "change": "DPU caches the USB4 DP route while not active (kept); deferred USB3 switches (removed in 1.142)."
+      },
+      {
+        "candidate": "1.138",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.138-vs-1.137.diff",
+        "sha256": "999967adb54c67fbfd1bef99d41f41ce423290da03ac36fd924d84b6af4301c3",
+        "scope": "superseded",
+        "change": "Experiment: DP rediscovery after the warm restart (clean form in 1.142)."
+      },
+      {
+        "candidate": "1.139",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.139-vs-1.138.diff",
+        "sha256": "e0bee11540cc43fc7509281ccd70195171faaa7b62cf9abdf1ae9f8962aa36f1",
+        "scope": "in",
+        "change": "Device links DWC3 -> router -> xHCI; router sleep in the normal phase (kept in 1.142)."
+      },
+      {
+        "candidate": "1.140",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.140-vs-1.139.diff",
+        "sha256": "e35054482c038c727c4f1910bbb9554cf807becdaa1425ab53d24fc1bedb9220",
+        "scope": "superseded",
+        "change": "Experiment: no xHCI reset-on-resume."
+      },
+      {
+        "candidate": "1.141",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.141-vs-1.140.diff",
+        "sha256": "8233816b4dbe98ed1c8d4b4a3fdf1f93dabcf5c271a12a138247b9200be59aee",
+        "scope": "superseded",
+        "change": "Experiment: USB3 re-activation delay and DWC3 core kept (clean form in 1.142)."
+      },
+      {
+        "candidate": "1.142",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.142-vs-1.141.diff",
+        "sha256": "f473bf92e1d057e04dab9e467f203b8b2b90257287be14492c3c35eea76735c7",
+        "scope": "in",
+        "change": "Clean kept-router system sleep."
+      },
+      {
+        "candidate": "1.143",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.143-vs-1.142.diff",
+        "sha256": "94bc60a95716bcaaee7e3651b53bff3129ecb927d34030e329871e21a9b4671c",
+        "scope": "in",
+        "change": "A partner that left during sleep is disconnected."
+      },
+      {
+        "candidate": "1.144",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.144-vs-1.143.diff",
+        "sha256": "6dff8923a1e5ef2ddd9b3e36abb0e233ab7611233d5bf93f17dd3b93ea119831",
+        "scope": "in",
+        "change": "dwc3-qcom defers the role-switch VBUS override while suspended."
+      },
+      {
+        "candidate": "1.145",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.145-vs-1.144.diff",
+        "sha256": "88d9c97bcf601b2177a36c97254cc5a0a0e03662877a876f64edd50809defae5",
+        "scope": "superseded",
+        "change": "Router link keeps the glue runtime-active (wrong fix, replaced by 1.146)."
+      },
+      {
+        "candidate": "1.146",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.146-vs-1.145.diff",
+        "sha256": "a1117a358796cbb7fa9ceafa2e464cd010abc7412acfcd45a302e04bd4a21f87",
+        "scope": "in",
+        "change": "Router holds the tunnelled xHCI runtime-active while it runs."
+      },
+      {
+        "candidate": "1.147",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.147-vs-1.146.diff",
+        "sha256": "f591c08ee5f778462285ea34a9ffe8536df8e2d4fdecf55f7ab7765cf4d5a5fe",
+        "scope": "in",
+        "change": "DP tunnel wait after sleep only if a sink was driven."
+      },
+      {
+        "candidate": "1.149",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.149-vs-1.147.diff",
+        "sha256": "6438b6112fdb77363656ef64fbe8599d1424f8351da34066b4a42f5c21df0ef6",
+        "scope": "in",
+        "change": "Router takes the combo PHY runtime PM reference."
+      },
+      {
+        "candidate": "1.151",
+        "path": "kernel/usb4-candidate/usb4-candidate-1.151-vs-1.149.diff",
+        "sha256": "71e2f351bf71e5460e46b44c2044ce14d8341dbbc0215785d0e09bd118d0460c",
+        "scope": "in",
+        "change": "USB3 re-activation delay whenever resume discovery tears down an enabled USB3 adapter."
+      }
+    ],
+    "not_in_chain": "Side branches 1.108 (withdrawn), 1.110-1.112 (backlight tests), 1.148 and 1.150 (USB3 delay tests) are not 1.151 inputs; 1.101 changed only the configuration. 1.152 is later and not included.",
+    "method": "Assemble the 1.151 source from the committed recipe inputs (upstream archive, baseline patches with 0010 removed from 1.113 on, checkpoint 0040 and the candidate diffs) and confirm all 150 recorded fingerprints and all 95,967 source files against the 1.151 build tree on the Spark. Target state A: the 1.89 tree with every in-scope file replaced by its 1.130 version and the 1.130 DEPOCHANGE hunk applied to glymur.dtsi. Target state B: state A with the in-scope files changed after 1.130 replaced by their 1.151 versions. Patches 01-09 are baseline -> A and patches 10-16 are A -> B, each file section generated by git diff --full-index --diff-algorithm=histogram with a/ b/ prefixes and the in-tree .gitattributes diff drivers disabled. The same command reproduces all 93 sections of the 1.89 patches byte for byte; 60 of them are unchanged here. Files back to stock (tb.h, usb4.c, xhci.c, usb/quirks.h) leave the series.",
+    "boundary": "Patches 01-09 end at the in-scope state of candidate 1.130 (stop-before-sleep model, tested on 1.129/1.130); patches 10-16 add the 1.131-1.151 changes.",
+    "mixed_paths": {
+      "arch/arm64/boot/dts/qcom/glymur.dtsi": "1.100 (SCMI memlat nodes, ADSP SMMU stream IDs)",
+      "arch/arm64/boot/dts/qcom/glymur-microsoft-surface-laptop8.dts": "1.92, 1.94, 1.95, 1.97, 1.98, 1.100, 1.109, 1.113",
+      "drivers/gpu/drm/display/drm_dp_helper.c": "1.113 (baseline patch 0010 no longer applied)",
+      "drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c": "1.113 (DPU core clock per layer mixer)",
+      "drivers/gpu/drm/msm/msm_drv.h": "1.92 (GMU driver)"
+    },
+    "out_of_scope": [
+      {
+        "candidates": "1.90",
+        "change": "qrtr resends HELLO on MHI resume (backport of 6a5719cc3ef2, Daniel J Blueman)",
+        "reason": "Wi-Fi resume; not USB4"
+      },
+      {
+        "candidates": "1.92",
+        "change": "GMU driver (Akhil P Oommen RFT series) and crypto node disabled",
+        "reason": "GPU and clock sync_state; not USB4. msm_drv.h keeps its 1.89 content"
+      },
+      {
+        "candidates": "1.92, 1.101",
+        "change": "Configuration: schedutil governor; SCMI memlat options",
+        "reason": "Not USB4; reproduce/kernel.config stays the 1.73 checkpoint configuration"
+      },
+      {
+        "candidates": "1.94, 1.95, 1.97",
+        "change": "Lid switch, Bluetooth (pwrseq-pcie-m2, hci_qca by Manivannan Sadhasivam, OF changeset helper), ath12k firmware MAC, wifi@0 node",
+        "reason": "Board input and wireless; not USB4"
+      },
+      {
+        "candidates": "1.97, 1.98",
+        "change": "Touchscreen and touchpad power and timing",
+        "reason": "Surface input devices"
+      },
+      {
+        "candidates": "1.99, 1.106",
+        "change": "platform_profile without ACPI; Surface platform profile",
+        "reason": "Power profiles"
+      },
+      {
+        "candidates": "1.100",
+        "change": "Board DT revision 14 supplies (USB, PCIe 5 and TCSR reference rails), lid wake on both edges, RPMh regulator enable state, Qualcomm SCMI memlat and ADSP SMMU stream IDs (Sibi Sankar, Pragnesh Papaniya, Sairamreddy Bojja)",
+        "reason": "Board power rails and memory scaling, not USB4-specific; glymur.dtsi keeps only the 1.130 DEPOCHANGE hunks"
+      },
+      {
+        "candidates": "1.106",
+        "change": "qmp-usb pipe clock before runtime PM (USB-A multiport PHYs), panel-edp Sharp LQ138P1JX61, eUSB2 repeater disabled in exit (Krishna Kurapati)",
+        "reason": "USB-A port, internal panel, and repeater leakage power; not the USB4/USB-C tunnelling path"
+      },
+      {
+        "candidates": "1.107, 1.109",
+        "change": "PCI host-common D3cold; SSD 3.3 V supply",
+        "reason": "PCIe and storage sleep power"
+      },
+      {
+        "candidates": "1.113",
+        "change": "Baseline patch 0010 dropped; PMK8850 PWM and PWM backlight; DPU core clock sized per layer mixer",
+        "reason": "Internal panel backlight and DPU clock power; drm_dp_helper.c, dpu_plane.c and the board DT keep their 1.89 content"
+      }
+    ],
+    "checks": [
+      "Every in-scope file of the reconstruction equals the 1.151 file byte for byte (89 files changed by the series plus the four files it returns to stock).",
+      "For the five mixed paths, applying the listed out-of-scope candidate hunks to the reconstruction gives the 1.151 file byte for byte.",
+      "Over the whole source tree the reconstruction differs from the 1.151 build tree only in the five mixed paths and 50 other files changed by out-of-scope candidates, plus its configuration (schedutil and SCMI memlat options) and one patch backup file in the build tree."
+    ]
   }
 }

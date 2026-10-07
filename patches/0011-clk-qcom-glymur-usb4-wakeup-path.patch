@@ -1,0 +1,35 @@
+Subject: [REVIEW 11/16] Glymur GCC: keep the USB4 router and PHY domains on the wakeup path
+
+Mark gcc_usb4_0_gdsc and gcc_usb_0_phy_gdsc GENPD_FLAG_ACTIVE_WAKEUP, so they stay on in system sleep while a device in them is on the wakeup path. A router kept across s2idle (patch 16) puts itself and its PHY on that path; a CX power collapse would otherwise take the router state. With no USB4 partner the domains switch off as before. Only router 0 and its PHY are marked.
+
+Dependencies: Patch 02 (same file). Used by patch 16.
+
+Source attribution: Local Surface change (candidate 1.131, kept in the 1.142 implementation).
+
+This is a review grouping of preserved source, not a new authorship claim or
+an independently build-validated upstream commit. Original attribution remains
+in the referenced provenance files. No new Signed-off-by trailers are added.
+
+---
+diff --git a/drivers/clk/qcom/gcc-glymur.c b/drivers/clk/qcom/gcc-glymur.c
+index b5a9036594fedc0f62118e204bb6393bff7fb287..07d0b830def803b6cef3f6194a4523e3ba71556a 100644
+--- a/drivers/clk/qcom/gcc-glymur.c
++++ b/drivers/clk/qcom/gcc-glymur.c
+@@ -7734,6 +7734,8 @@ static struct gdsc gcc_usb4_0_gdsc = {
+ 	.clk_dis_wait_val = 0xf,
+ 	.pd = {
+ 		.name = "gcc_usb4_0_gdsc",
++		/* A router kept across system sleep holds its state here. */
++		.flags = GENPD_FLAG_ACTIVE_WAKEUP,
+ 	},
+ 	.pwrsts = PWRSTS_OFF_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,
+@@ -7770,6 +7772,8 @@ static struct gdsc gcc_usb_0_phy_gdsc = {
+ 	.clk_dis_wait_val = 0x2,
+ 	.pd = {
+ 		.name = "gcc_usb_0_phy_gdsc",
++		/* And its PHY, which stays initialized with it. */
++		.flags = GENPD_FLAG_ACTIVE_WAKEUP,
+ 	},
+ 	.pwrsts = PWRSTS_RET_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,

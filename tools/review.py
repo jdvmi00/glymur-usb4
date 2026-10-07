@@ -17,6 +17,7 @@ WORK = OUTPUT / 'reconstructed'
 TREE = WORK / 'linux-7.3-rc2'
 UPSTREAM_SHA256 = '6b97fb9397172e95ed95b56a78524a184bf186858bea7a271b9ebe81a0e57417'
 CANDIDATE = ROOT / 'reproduce'
+FINGERPRINTS = 98
 
 
 def digest(path):
@@ -69,11 +70,11 @@ def verify_tree():
         expected, name = line.split(maxsplit=1)
         require(digest(TREE / name) == expected, f'source fingerprint mismatch: {name}')
         count += 1
-    require(count == 93, f'unexpected source fingerprint count: {count}')
+    require(count == FINGERPRINTS, f'unexpected source fingerprint count: {count}')
     require((TREE / '.config').read_bytes() ==
             (CANDIDATE / 'kernel.config').read_bytes(),
             'configuration mismatch')
-    print('PASS: 93 source fingerprints and checkpoint configuration', flush=True)
+    print(f'PASS: {count} source fingerprints and checkpoint configuration', flush=True)
 
 
 def reconstruct(archive):
@@ -93,7 +94,9 @@ def reconstruct(archive):
         # Prevent git apply from discovering a containing workspace repository
         # whose ignore rules would silently skip paths in this build directory.
         run(['git', 'init', '--quiet', TREE], log=log)
-        # The order is preserved from the recorded 1.89 PKGBUILD prepare().
+        # The order is preserved from the recorded 1.89 PKGBUILD prepare(): the
+        # Surface 1.17 prerequisites. Candidates from 1.113 on no longer apply
+        # 0010; the review baseline keeps it (docs/PROVENANCE.md).
         # Use git apply for baseline patches just as the recipe does. No
         # PKGBUILD evaluation, make, packaging, installation or device access.
         numbers = list(range(1, 13)) + list(range(14, 20)) + [13] + list(range(20, 40))
@@ -110,7 +113,7 @@ def reconstruct(archive):
             print(f'Applying {patch.name}...', flush=True)
             run(['git', 'apply', patch], cwd=TREE, log=log)
         shutil.copy2(CANDIDATE / 'kernel.config', TREE / '.config')
-        (TREE / 'localversion.10-pkgrel').write_text('-1.89\n')
+        (TREE / 'localversion.10-pkgrel').write_text('-1.151\n')
         (TREE / 'localversion.20-pkgname').write_text('-aarch64\n')
     verify_tree()
     print('Source ready under build-output/reconstructed/linux-7.3-rc2/')
