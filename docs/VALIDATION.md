@@ -98,7 +98,9 @@ AArch64 builder container (GCC 16.1.1) with `reproduce/kernel.config`:
 `olddefconfig` left the configuration unchanged, and `Image`, all 3,630
 modules and the device trees built without errors. The build printed the same
 11 warnings as the clean 1.113 Surface build, none in a file the series
-touches. No package was made and nothing was installed or booted.
+touches. No package was made and nothing was installed or booted. That build
+still used the tested kernel's release suffix, `-1.151-aarch64`; the helper
+now writes `-1.151-glymur-usb4`, and no source file changed.
 
 ## Simulated tests
 

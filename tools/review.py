@@ -113,8 +113,9 @@ def reconstruct(archive):
             print(f'Applying {patch.name}...', flush=True)
             run(['git', 'apply', patch], cwd=TREE, log=log)
         shutil.copy2(CANDIDATE / 'kernel.config', TREE / '.config')
+        # Not the tested kernel's -1.151-aarch64: the source differs (docs/REPRODUCE.md).
         (TREE / 'localversion.10-pkgrel').write_text('-1.151\n')
-        (TREE / 'localversion.20-pkgname').write_text('-aarch64\n')
+        (TREE / 'localversion.20-pkgname').write_text('-glymur-usb4\n')
     verify_tree()
     print('Source ready under build-output/reconstructed/linux-7.3-rc2/')
 

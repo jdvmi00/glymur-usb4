@@ -25,8 +25,10 @@ longer applied baseline patch 0010. Of the 98 files checked, 93 equal their
 1.151 versions; the other five also carry those changes in 1.151. The saved
 configuration is the 1.73 checkpoint; the tested kernel differed only in the
 default CPU frequency governor and three options for the left-out memory
-latency driver. [Results and limits](VALIDATION.md) records a build of the
-reconstructed tree.
+latency driver. A build of the tree therefore reports its own release,
+`7.3.0-rc2-1.151-glymur-usb4-ARCH`, rather than the tested kernel's
+`7.3.0-rc2-1.151-aarch64-ARCH`. [Results and limits](VALIDATION.md) records
+a build of the reconstructed tree.
 
 Tests compile with `tests/harness.h`: failed C assertions retain their stderr
 message and exit with status 134 instead of invoking the system crash handler.
@@ -35,9 +37,10 @@ not count as successful rejection. No system crash-reporting settings change.
 
 For another build system, use the same upstream base and baseline preparation
 order in `tools/review.py`, then apply the files listed in `patches/series` with
-`git apply`. Use `reproduce/kernel.config` for the exact Surface configuration.
-The generated tree is input to the builder's existing ARM64 kernel/package
-process; this repository does not supply that packaging or firmware. See the
+`git apply`. Use `reproduce/kernel.config`, which differs from the tested
+configuration only as described above. The generated tree is input to the
+builder's existing ARM64 kernel/package process; this repository does not
+supply that packaging or firmware. See the
 [series map](../patches/README.md) for dependencies and configuration guidance.
 Other kernel bases or selected subsets require a separate port and validation.
 
