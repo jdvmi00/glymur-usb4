@@ -7,9 +7,10 @@ experiments are in the chain but replaced before 1.151, so only their final
 form appears. `provenance/derivation.json` (`update_1_151`) records the same
 list with the input hashes.
 
-Not in the 1.151 chain: 1.101 changed only the configuration, 1.108 was
-withdrawn, 1.110-1.112 tested backlight changes, and 1.148 and 1.150 were USB3
-delay tests that led to 1.151. 1.152 came later and is not included.
+1.101 changed only the configuration and has no source diff (see Left out).
+Not in the 1.151 chain: 1.108 was withdrawn, 1.110-1.112 tested backlight
+changes, and 1.148 and 1.150 were USB3 delay tests that led to 1.151. 1.152
+came later and is not included.
 
 ## Included
 

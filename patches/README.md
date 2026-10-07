@@ -37,7 +37,8 @@ compile. Each patch explains its purpose and retained attribution. Full-series
 source reconstruction and tests pass, and the full series builds; per-prefix
 compilation/bisectability remains work for upstream submission, along with
 splitting mixed-purpose file changes more finely. Patches 12 and 13 fix stock
-code and are the nearest to separate upstream submissions.
+code, also apply to stock 7.3-rc2 on their own (13 with line offsets), and are
+the nearest to separate upstream submissions.
 
 For the tested configuration, `reproduce/kernel.config` includes
 `CONFIG_ARCH_QCOM=y`, `CONFIG_USB4=m`, `CONFIG_USB4_QCOM=y`,

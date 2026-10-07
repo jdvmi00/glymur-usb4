@@ -4,15 +4,15 @@
 path and SHA256 in the Surface Laptop 8 project. Entries in `files` are
 unchanged copies from source commit `916fea4551f656c35f3fdaec1ad1c5a4ecf885b3`
 (the manifest's `source_commit`). Entries in `derived_files` are the review
-patches, the
-source fingerprint list and the tests; each records its source, where there
-is one, and the change made. `provenance/derivation.json` records the
-original inputs, the pinned aggregate patch and its partition into nine
+patches, the source fingerprint list and the tests; each records its source,
+where there is one, and the change made. `provenance/derivation.json` records
+the original inputs, the pinned aggregate patch and its partition into nine
 review patches, and the 1.89 and 1.151 updates (`update_1_89`,
 `update_1_151`). Every file's diff stays together within patches 01-09, and
-within patches 10-16. Only grouping, descriptive headers and diff path
-prefixes differ from the recorded Surface sources; the resulting C and
-device-tree bytes do not.
+within patches 10-16. Apart from grouping, descriptive headers and diff path
+prefixes, the resulting C and device-tree bytes equal the recorded Surface
+1.151 sources, except in the five files that also carry changes this series
+leaves out (see the 1.151 update below).
 
 - `provenance/usb4/` preserves Konrad Dybcio's USB4 PHY v5 series and the
   subsequent PHY, clock/reset, GLINK and host-router decomposition.
