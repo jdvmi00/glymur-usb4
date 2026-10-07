@@ -32,6 +32,8 @@ static void reinit_completion(int *c) {(void)c;resets++;}
 static int wait_for_completion_timeout(int*c,int t) {(void)c;assert(!tunneled&&t==30);waits++;return complete;}
 #define dev_warn(...) (warnings++)
 #define dev_info(...) (infos++)
+/* 1.120 moved the success trace to debug output; count either level. */
+#define dev_dbg(...) (infos++)
 #define pr_warn(...) (warnings++)
 #define drm_dbg_dp(...) ((void)0)
 #define readl_poll_timeout(addr,value,condition,sleep_us,timeout_us) ({ \

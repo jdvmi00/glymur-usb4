@@ -443,38 +443,40 @@
     },
     {
       "path": "tests/test-usb4-idle-status.py",
-      "sha256": "525fc4e950edd813fca6a475666edffb2bfd34a9c839566e5bf7d3f3f73846f9",
+      "sha256": "8d630cd3da9c06cd8d89da6d6220bdad74b1032350634fd5e1798017338ac8d4",
       "source_path": "kernel/usb4-candidate/test-usb4-idle-status.py",
       "source_sha256": "d1806a5efc37ccc848758b77590b2056a0b43c6674465cfec646754af7269f90",
-      "change": "Include local assertion-exit handler; require exit 134 for negative controls instead of any nonzero status."
+      "change": "Include local assertion-exit handler; require exit 134 for negative controls instead of any nonzero status. 1.151: count the debug-level success message (1.120 moved it from info to debug)."
     },
     {
       "path": "tests/test-usb4-link-irq.py",
-      "sha256": "fd3a3e24c5fd9552ecbdc63ca09ba306cb47beff659c2c78ca2fc68bd30f4e5f",
+      "sha256": "6ffaf2aff3f3233c59d877f8edd8fb6711a1269fadcb665acde6819f76320631",
       "source_path": "kernel/usb4-candidate/test-usb4-link-irq.py",
       "source_sha256": "6c311a0ecab128f715ca1256568795a0b5cca53f40436070513676f5b7cc3036",
-      "change": "Include local assertion-exit handler; require exit 134 for negative controls instead of any nonzero status."
+      "change": "Include local assertion-exit handler; require exit 134 for negative controls instead of any nonzero status. 1.151: stub the debug messages the extracted functions now use."
     },
     {
       "path": "tests/test-usb4-route-restore.py",
-      "sha256": "09e2f5897e8a75211b0897fbae1b3fa979ef9f80f72aa9f0e05aee2be3c64de4",
+      "sha256": "4f963c09bf125326521380403e4c00b860515ad9d34a49059c9650a946b94699",
       "source_path": "kernel/usb4-candidate/test-usb4-route-restore.py",
       "source_sha256": "8ea58fa9673dff7b4bde70a2f68fb99dc47fd68d635fd1cd0208a00fed48760b",
-      "change": "Include local assertion-exit handler; require exit 134 for negative controls instead of any nonzero status."
+      "change": "Include local assertion-exit handler; require exit 134 for negative controls instead of any nonzero status. 1.151: the route is programmed only into an active DPU and cached otherwise (candidate 1.137); scenarios cover runtime-suspended and sleep-disabled runtime PM, with two further negative controls."
     },
     {
       "path": "tests/test-usb4-port-ownership.py",
-      "sha256": "ea664a02e7ef8f2ce3ac00cb6d35adc301d649815c8b1952a6078537ba81119f",
+      "sha256": "4d6979387b600d389c203d5c9ab539d6414099f316ccf67ec4309f883f7c305d",
       "source_path": "kernel/usb4-candidate/test-usb4-port-ownership.py",
-      "source_sha256": "48ecad188c7405a014b2ede1b49f532281361a3b63f7368c87b1d64b826e2505",
-      "change": "Include local assertion-exit handler; add in-script negative controls that must exit 134 (the source suite was mutation-checked externally)."
+      "source_sha256": "7189a56535bd56dac157f24acd77e59ee0d5d74b0c6c321c7ed7d8b3f9669ed6",
+      "change": "Rewritten for 1.151 from the 1.96 version, the last before the Surface repository removed it as stale: assertion-exit handler, constants read from the source, the stop-and-restart sleep path (hibernation) and the kept-router s2idle path with a partner that leaves during sleep, and 15 in-script negative controls that must exit 134.",
+      "source_commit": "157ac65fc129f2f5f08782edf383a0c598a827c3"
     },
     {
       "path": "tests/test-usb4-phy-typec-mode.py",
-      "sha256": "2fcd701f067f71e171af4440dbb7f3a5d867a84e1bb7163715a049e15141ba66",
+      "sha256": "ba030d25ee2c18dee551a8624a56eeaad8f95b300b15f453a692a7f988521824",
       "source_path": "kernel/usb4-candidate/test-usb4-phy-typec-mode.py",
-      "source_sha256": "b707ec7dc2c8af311df646b992bd041edd807d7606c7b3dbe2568a64dfe0ea8c",
-      "change": "Include local assertion-exit handler; add in-script negative controls that must exit 134 (the source suite was mutation-checked externally)."
+      "source_sha256": "185a7120da02ed0decbf59478a096a3b7be129a45af9c647eb5766ae4745d1e9",
+      "change": "Include local assertion-exit handler; add in-script negative controls that must exit 134 (the source suite was mutation-checked externally). Source updated to the 1.93 version (USB4 always-on toggle). Local addition for 1.151: the USB4 clamp across system sleep (candidate 1.142) and four negative controls for both.",
+      "source_commit": "87d851a6891772d7ed15a08e0449b77a12a78356"
     },
     {
       "path": "tests/test-msm-dp-hpd-deferral.py",
@@ -482,6 +484,31 @@
       "source_path": "kernel/usb4-candidate/test-msm-dp-hpd-deferral.py",
       "source_sha256": "86783b8d949e24ee720c276c4b93fa9b13f2479c212dc49a9439de63d4d7371f",
       "change": "Include local assertion-exit handler; add in-script negative controls that must exit 134 (the source suite was mutation-checked externally)."
+    },
+    {
+      "path": "tests/test-msm-kms-usb4-sleep.py",
+      "sha256": "f50436f9347497ae67c20c3c43137157ad3cc96940e9b4224cfbcfb6bba4baed",
+      "change": "New for 1.151: MSM KMS ownership of the saved modeset around USB4 sleep (candidate 1.118), with five negative controls."
+    },
+    {
+      "path": "tests/test-usb4-dp-sleep.py",
+      "sha256": "6fd634f81104a7325df28fc91c628dfe21636191f990f0135e6a9e8325af3a97",
+      "change": "New for 1.151: DP provider sleep save, rediscovery and restore, and the readiness wait only after a driven sink (candidates 1.118, 1.142 and 1.147), with five negative controls."
+    },
+    {
+      "path": "tests/test-usb-tunnel-lpm.py",
+      "sha256": "8c8c92deaa8c467348feaf9f1ec9a7a8c3ec0b331776351b0484241354b21962",
+      "change": "New for 1.151: no hub-initiated U1 on USB3 links tunnelled over USB4, U2 kept (candidate 1.127), with four negative controls."
+    },
+    {
+      "path": "tests/test-dwc3-qcom-vbus-sleep.py",
+      "sha256": "898730ba930bb4a885aadb01b4f66cf3fb3a19fc3549873e0a17a87e19127999",
+      "change": "New for 1.151: dwc3-qcom role-switch VBUS override deferred while suspended (candidate 1.144), with five negative controls."
+    },
+    {
+      "path": "tests/test-tb-usb3-resume-delay.py",
+      "sha256": "79d87696f6f068a9e45ab50e2300db051a1f9c1d4e935bd9693b8268e0ad10c1",
+      "change": "New for 1.151: USB3 re-activation delay when resume discovery tears down an enabled adapter (candidate 1.151), with four negative controls including the stock condition."
     },
     {
       "path": "tests/harness.h",

@@ -128,15 +128,21 @@ def test():
     scripts = ROOT / 'tests'
     ctrl = TREE / 'drivers/gpu/drm/msm/dp/dp_ctrl.c'
     dpu = TREE / 'drivers/gpu/drm/msm/disp/dpu1'
+    tbt = TREE / 'drivers/thunderbolt'
     cases = [
-        ('test-usb4-fec-integration.py', ['--provider', TREE / 'drivers/thunderbolt/qcom-usb4-dp.c', '--ctrl', ctrl]),
+        ('test-usb4-fec-integration.py', ['--provider', tbt / 'qcom-usb4-dp.c', '--ctrl', ctrl]),
         ('test-usb4-route-restore.py', ['--source-dir', dpu]),
         ('test-dpu-plane-split-reset.py', [dpu / 'dpu_plane.c']),
         ('test-usb4-idle-status.py', ['--source', ctrl]),
         ('test-usb4-link-irq.py', ['--source', ctrl]),
-        ('test-usb4-port-ownership.py', ['--source', TREE / 'drivers/thunderbolt/qcom-usb4-host.c']),
+        ('test-usb4-port-ownership.py', ['--source', tbt / 'qcom-usb4-host.c']),
         ('test-usb4-phy-typec-mode.py', ['--source', TREE / 'drivers/phy/qualcomm/phy-qcom-qmp-combo.c']),
         ('test-msm-dp-hpd-deferral.py', ['--source', TREE / 'drivers/gpu/drm/msm/dp/dp_display.c']),
+        ('test-msm-kms-usb4-sleep.py', ['--source', TREE / 'drivers/gpu/drm/msm/msm_kms.c']),
+        ('test-usb4-dp-sleep.py', ['--source', tbt / 'qcom-usb4-dp.c']),
+        ('test-usb-tunnel-lpm.py', ['--source', TREE / 'drivers/usb/core/hub.c']),
+        ('test-dwc3-qcom-vbus-sleep.py', ['--source', TREE / 'drivers/usb/dwc3/dwc3-qcom.c']),
+        ('test-tb-usb3-resume-delay.py', ['--source', tbt / 'tb.c']),
     ]
     results = OUTPUT / 'test-results'
     results.mkdir(exist_ok=True)
@@ -145,7 +151,7 @@ def test():
         with (results / (name + '.log')).open('w') as log:
             run([sys.executable, '-B', scripts / name, *args], log=log)
         print((results / (name + '.log')).read_text(), end='')
-    print('PASS: eight extracted-code test suites; no hardware validation')
+    print(f'PASS: {len(cases)} extracted-code test suites; no hardware validation')
 
 
 def main():

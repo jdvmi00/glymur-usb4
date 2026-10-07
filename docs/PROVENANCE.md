@@ -81,3 +81,6 @@ code from Krishna Kurapati's role-switching series; neither change is posted.
 The sleep register sequence in patches 10 and 16 follows the behavior of
 Qualcomm's Windows USB4 driver as determined by static analysis; no vendor
 code is included.
+
+Five test suites were updated for 1.151 and five added; their manifest
+entries describe the change and, for adapted suites, the Surface source.

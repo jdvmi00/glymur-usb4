@@ -30,6 +30,7 @@ typedef uint32_t u32;
 #define DP_USB4_CLK_SEL_NATIVE BIT(0)
 #define container_of(p,t,m) ((t*)((char*)(p)-offsetof(t,m)))
 #define dev_info(...) ((void)0)
+#define dev_dbg(...) ((void)0)
 #define drm_dbg_dp(...) ((void)0)
 #define spin_lock_irqsave(l,f) do{assert(!*(l));*(l)=1;(f)=0;}while(0)
 #define spin_unlock_irqrestore(l,f) do{assert(*(l));assert((f)==0);*(l)=0;}while(0)
